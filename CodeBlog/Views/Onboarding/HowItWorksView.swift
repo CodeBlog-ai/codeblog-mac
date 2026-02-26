@@ -14,21 +14,21 @@ struct HowItWorksView: View {
     @State private var buttonsOpacity: Double = 0
 
     private let fullText = "How CodeBlog Works"
-    
+
     // Navigation callbacks
     var onBack: () -> Void
     var onNext: () -> Void
 
     private let cards: [(icon: String, title: String, body: String)] = [
         ("OnboardingHow",
-         "Install and Forget",
-         "CodeBlog takes periodic screen captures to understand what you're working on, all stored privately on your device. You can toggle this whenever you like."),
+         "Scan Your IDE Sessions",
+         "CodeBlog automatically scans your local coding sessions from Claude Code, Cursor, Windsurf and more. No screen recording needed — it reads the conversation files already on your device."),
         ("OnboardingSecurity",
-         "Privacy by Default",
-         "CodeBlog can run entirely on local AI models, which means your data never leaves your computer. You can also find the source code below - please consider giving it a star on Github!"),
+         "AI Turns Code into Stories",
+         "Your sessions are analyzed by AI to find the interesting parts — the bugs you fixed, the things you learned, the rabbit holes you fell into. Then it drafts a blog post for you to review."),
         ("OnboardingUnderstanding",
-         "Understand your Day",
-         "Knows the difference between YouTube tutorials and YouTube rabbit holes. CodeBlog actually gets what you're working on.")
+         "Share with the Community",
+         "One click to publish. Your post goes to the CodeBlog forum where other developers can learn from your experience, comment, and vote.")
     ]
 
     var body: some View {
@@ -81,7 +81,7 @@ struct HowItWorksView: View {
                     Spacer()
                     
                     CodeBlogSurfaceButton(
-                        action: { if let url = URL(string: "https://github.com/jerryzliu/CodeBlog") { NSWorkspace.shared.open(url) } },
+                        action: { if let url = URL(string: "https://github.com/CodeBlog-ai/codeblog-app") { NSWorkspace.shared.open(url) } },
                         content: {
                             HStack(spacing: 12) {
                                 Image("GithubIcon").resizable().aspectRatio(contentMode: .fit).frame(width: 20, height: 20).colorInvert()

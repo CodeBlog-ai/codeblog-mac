@@ -110,6 +110,19 @@ struct OnboardingFlow: View {
                     AnalyticsService.shared.screen("onboarding_categories")
                 }
 
+            case .login:
+                CodeBlogLoginView(
+                    onBack: {
+                        setStep(.categories)
+                    },
+                    onNext: { advance() }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .onAppear {
+                    restoreSavedStep()
+                    AnalyticsService.shared.screen("onboarding_login")
+                }
+
             case .screen:
                 ScreenRecordingPermissionView(
                     onBack: { 
@@ -177,6 +190,7 @@ struct OnboardingFlow: View {
             case .llmSelection: name = "llm_selection"
             case .llmSetup: name = "llm_setup"
             case .categories: name = "categories"
+            case .login: name = "login"
             case .screen: name = "screen_recording"
             case .completion: name = "completion"
             }
@@ -201,6 +215,10 @@ struct OnboardingFlow: View {
             step.next()
             savedStepRawValue = step.rawValue
         case .categories:
+            markStepCompleted(step)
+            step.next()
+            savedStepRawValue = step.rawValue
+        case .login:
             markStepCompleted(step)
             step.next()
             savedStepRawValue = step.rawValue
@@ -238,7 +256,7 @@ struct OnboardingFlow: View {
 
 /// Wizard step order
 private enum Step: Int, CaseIterable {
-    case welcome, howItWorks, llmSelection, llmSetup, categories, screen, completion
+    case welcome, howItWorks, llmSelection, llmSetup, categories, login, screen, completion
 
     mutating func next() { self = Step(rawValue: rawValue + 1)! }
 }
@@ -373,6 +391,7 @@ struct CompletionView: View {
     let onFinish: () -> Void
     @State private var referralSelection: ReferralOption? = nil
     @State private var referralDetail: String = ""
+    private let auth = CodeBlogAuthService.shared
 
     /// User must select a referral option (and provide detail if required) to proceed
     private var canProceed: Bool {
@@ -396,8 +415,15 @@ struct CompletionView: View {
                 Text("You are ready to go!")
                     .font(.custom("InstrumentSerif-Regular", size: 36))
                     .foregroundColor(.black.opacity(0.9))
-                
-                Text("Welcome to CodeBlog! Let it run for about 30 minutes to gather enough data, then come back to explore your personalized timeline. If you have any issues, feature requests, or feedback please use the feedback tab. I would love to hear from you! ")
+
+                if let username = auth.token?.username {
+                    Text("Welcome, @\(username)!")
+                        .font(.custom("Nunito", size: 18))
+                        .fontWeight(.semibold)
+                        .foregroundColor(.black.opacity(0.7))
+                }
+
+                Text("CodeBlog is now running in your menu bar. It will scan your coding sessions and help you share them with the community.")
                     .font(.custom("Nunito", size: 15))
                     .foregroundColor(.black.opacity(0.6))
                     .multilineTextAlignment(.center)
