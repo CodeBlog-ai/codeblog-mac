@@ -149,6 +149,8 @@ struct LLMProviderSetupView: View {
             return "Use local AI"
         case "chatgpt_claude":
             return "Connect ChatGPT or Claude"
+        case "thirdparty":
+            return "Third-Party API"
         default:
             return "Gemini"
         }
@@ -566,6 +568,17 @@ struct LLMProviderSetupView: View {
                                         setupState.testSuccessful = success
                                     }
                                 )
+                            } else if providerType == "thirdparty" {
+                                ThirdPartyTestConnectionView(
+                                    provider: setupState.thirdPartyProvider,
+                                    apiKey: setupState.thirdPartyAPIKey,
+                                    baseURL: setupState.thirdPartyBaseURL,
+                                    model: setupState.thirdPartyModel,
+                                    onTestComplete: { success in
+                                        setupState.hasTestedConnection = true
+                                        setupState.testSuccessful = success
+                                    }
+                                )
                             } else {
                                 // Engine selection: LM Studio or Custom
                                 VStack(alignment: .leading, spacing: 12) {
@@ -704,9 +717,252 @@ struct LLMProviderSetupView: View {
                     nextButton
                 }
             }
+
+        case .thirdPartyProviderChoice:
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Choose your AI provider")
+                        .font(.custom("Nunito", size: 24))
+                        .fontWeight(.semibold)
+                        .foregroundColor(.black.opacity(0.9))
+                    Text("Select the AI service you'd like to use. You can change this anytime in Settings.")
+                        .font(.custom("Nunito", size: 14))
+                        .foregroundColor(.black.opacity(0.6))
+                }
+
+                // Provider grid (2 columns)
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                    ForEach(ThirdPartyProvider.allCases, id: \.rawValue) { provider in
+                        Button(action: { setupState.selectThirdPartyProvider(provider) }) {
+                            HStack(spacing: 12) {
+                                Group {
+                                    if let assetName = provider.iconAssetName {
+                                        Image(assetName)
+                                            .resizable()
+                                            .scaledToFit()
+                                            .frame(width: 20, height: 20)
+                                    } else {
+                                        Image(systemName: provider.iconSystemName)
+                                            .font(.system(size: 16))
+                                    }
+                                }
+                                .frame(width: 32, height: 32)
+                                .background(Color.white.opacity(0.7))
+                                .cornerRadius(6)
+
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(provider.displayName)
+                                        .font(.custom("Nunito", size: 14))
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(.black.opacity(0.85))
+                                    Text(provider.shortDescription)
+                                        .font(.custom("Nunito", size: 11))
+                                        .foregroundColor(.black.opacity(0.5))
+                                        .lineLimit(1)
+                                }
+
+                                Spacer()
+
+                                if setupState.thirdPartyProvider == provider {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(Color(red: 1, green: 0.42, blue: 0.02))
+                                        .font(.system(size: 16))
+                                } else {
+                                    Circle()
+                                        .strokeBorder(Color.black.opacity(0.15), lineWidth: 1.5)
+                                        .frame(width: 16, height: 16)
+                                }
+                            }
+                            .padding(14)
+                            .background(
+                                setupState.thirdPartyProvider == provider
+                                    ? Color(red: 1, green: 0.42, blue: 0.02).opacity(0.06)
+                                    : Color.white.opacity(0.5)
+                            )
+                            .cornerRadius(10)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10)
+                                    .stroke(
+                                        setupState.thirdPartyProvider == provider
+                                            ? Color(red: 1, green: 0.42, blue: 0.02).opacity(0.4)
+                                            : Color.black.opacity(0.05),
+                                        lineWidth: 1
+                                    )
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .pointingHandCursor()
+                    }
+                }
+
+                HStack { Spacer(); nextButton }
+            }
+
+        case .thirdPartyAPIKeyInput:
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Enter your \(setupState.thirdPartyProvider.displayName) API key")
+                        .font(.custom("Nunito", size: 24))
+                        .fontWeight(.semibold)
+                        .foregroundColor(.black.opacity(0.9))
+                    Text("Your key is encrypted and stored locally in macOS Keychain — never uploaded anywhere.")
+                        .font(.custom("Nunito", size: 14))
+                        .foregroundColor(.black.opacity(0.6))
+                }
+
+                // API Key input
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("API Key")
+                        .font(.custom("Nunito", size: 14))
+                        .fontWeight(.semibold)
+                        .foregroundColor(.black.opacity(0.75))
+
+                    SecureField(setupState.thirdPartyProvider.keyPlaceholder, text: $setupState.thirdPartyAPIKey)
+                        .font(.system(.body, design: .monospaced))
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                        .background(Color.white.opacity(0.8))
+                        .cornerRadius(8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(
+                                    {
+                                        let trimmed = setupState.thirdPartyAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                                        if trimmed.isEmpty { return Color.black.opacity(0.1) }
+                                        return setupState.thirdPartyProvider.validateKey(trimmed)
+                                            ? Color(red: 0.34, green: 1, blue: 0.45).opacity(0.6)
+                                            : Color(hex: "E91515").opacity(0.6)
+                                    }(),
+                                    lineWidth: 1
+                                )
+                        )
+
+                    // Validation feedback
+                    let trimmed = setupState.thirdPartyAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty && !setupState.thirdPartyProvider.validateKey(trimmed) {
+                        if let prefix = setupState.thirdPartyProvider.keyPrefix {
+                            Text("Key should start with \"\(prefix)\"")
+                                .font(.custom("Nunito", size: 12))
+                                .foregroundColor(Color(hex: "E91515"))
+                        }
+                    }
+
+                    HStack(spacing: 6) {
+                        Image(systemName: "lock.shield.fill")
+                            .foregroundColor(.green.opacity(0.7))
+                            .font(.system(size: 11))
+                        Text("Your API key is encrypted and stored in your macOS Keychain")
+                            .font(.custom("Nunito", size: 12))
+                            .foregroundColor(.black.opacity(0.5))
+                    }
+                }
+
+                // Base URL input (optional)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 4) {
+                        Text("Base URL")
+                            .font(.custom("Nunito", size: 14))
+                            .fontWeight(.semibold)
+                            .foregroundColor(.black.opacity(0.75))
+                        Text("(optional)")
+                            .font(.custom("Nunito", size: 12))
+                            .foregroundColor(.black.opacity(0.4))
+                    }
+
+                    TextField(setupState.thirdPartyProvider.defaultBaseURL, text: $setupState.thirdPartyBaseURL)
+                        .font(.system(.body, design: .monospaced))
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                        .background(Color.white.opacity(0.8))
+                        .cornerRadius(8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.black.opacity(0.1), lineWidth: 1)
+                        )
+                }
+
+                HStack { Spacer(); nextButton }
+            }
+
+        case .thirdPartyModelSelection:
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Choose a model")
+                        .font(.custom("Nunito", size: 24))
+                        .fontWeight(.semibold)
+                        .foregroundColor(.black.opacity(0.9))
+                    Text("Select the AI model to use for processing. You can change this later in Settings.")
+                        .font(.custom("Nunito", size: 14))
+                        .foregroundColor(.black.opacity(0.6))
+                }
+
+                if setupState.isFetchingModels {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("Fetching available models...")
+                            .font(.custom("Nunito", size: 14))
+                            .foregroundColor(.black.opacity(0.6))
+                    }
+                    .padding(.vertical, 8)
+                } else if !setupState.thirdPartyAvailableModels.isEmpty {
+                    ThirdPartyModelListView(
+                        models: setupState.thirdPartyAvailableModels,
+                        selectedModel: $setupState.thirdPartyModel
+                    )
+                } else {
+                    // Manual model input (fallback)
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let error = setupState.modelFetchError {
+                            HStack(spacing: 6) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundColor(.orange)
+                                    .font(.system(size: 12))
+                                Text(error)
+                                    .font(.custom("Nunito", size: 12))
+                                    .foregroundColor(.black.opacity(0.6))
+                            }
+
+                            Button(action: { setupState.fetchThirdPartyModels() }) {
+                                Text("Retry")
+                                    .font(.custom("Nunito", size: 12))
+                                    .fontWeight(.semibold)
+                                    .foregroundColor(Color(red: 1, green: 0.42, blue: 0.02))
+                            }
+                            .buttonStyle(.plain)
+                            .pointingHandCursor()
+                        }
+
+                        Text("Model ID")
+                            .font(.custom("Nunito", size: 14))
+                            .fontWeight(.semibold)
+                            .foregroundColor(.black.opacity(0.75))
+
+                        TextField(setupState.thirdPartyProvider.defaultModel, text: $setupState.thirdPartyModel)
+                            .font(.system(.body, design: .monospaced))
+                            .textFieldStyle(.plain)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                            .background(Color.white.opacity(0.8))
+                            .cornerRadius(8)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.black.opacity(0.1), lineWidth: 1)
+                            )
+
+                        Text("Enter the model identifier (e.g., \(setupState.thirdPartyProvider.defaultModel))")
+                            .font(.custom("Nunito", size: 12))
+                            .foregroundColor(.black.opacity(0.5))
+                    }
+                }
+
+                HStack { Spacer(); nextButton }
+            }
         }
     }
-    
+
     private func handleBack() {
         if setupState.currentStepIndex == 0 {
             onBack()
@@ -740,12 +996,39 @@ struct LLMProviderSetupView: View {
             KeychainManager.shared.store(setupState.apiKey, for: "gemini")
             GeminiModelPreference(primary: setupState.geminiModel).save()
         }
-        
+
         // Save local endpoint for local engine selection
         if activeProviderType == "ollama" {
             persistLocalSettings()
         }
-        
+
+        // Save third-party provider configuration
+        if activeProviderType == "thirdparty" {
+            let provider = setupState.thirdPartyProvider
+            let trimmedKey = setupState.thirdPartyAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedURL = setupState.thirdPartyBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedModel = setupState.thirdPartyModel.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Store API key in Keychain
+            if !trimmedKey.isEmpty {
+                let keychainKey = ThirdPartyProviderDefaults.keychainKey(for: provider)
+                _ = KeychainManager.shared.store(trimmedKey, for: keychainKey)
+            }
+
+            // Store provider config in UserDefaults
+            UserDefaults.standard.set(provider.rawValue, forKey: ThirdPartyProviderDefaults.providerKindKey)
+            UserDefaults.standard.set(trimmedURL, forKey: ThirdPartyProviderDefaults.baseURLKey)
+            UserDefaults.standard.set(trimmedModel, forKey: ThirdPartyProviderDefaults.modelKey)
+
+            // Persist as current LLM provider
+            let providerType = LLMProviderType.thirdPartyAPI(
+                provider: provider,
+                endpoint: trimmedURL,
+                model: trimmedModel.isEmpty ? nil : trimmedModel
+            )
+            providerType.persist()
+        }
+
         // Mark setup as complete
         UserDefaults.standard.set(true, forKey: "\(activeProviderType)SetupComplete")
     }
@@ -833,6 +1116,14 @@ class ProviderSetupState: ObservableObject {
     @Published var debugCommandOutput: String = ""
     @Published var isRunningDebugCommand: Bool = false
     @Published var preferredCLITool: CLITool? = ProviderSetupState.loadStoredPreferredCLITool()
+    // Third-party provider configuration
+    @Published var thirdPartyProvider: ThirdPartyProvider = .openai
+    @Published var thirdPartyAPIKey: String = ""
+    @Published var thirdPartyBaseURL: String = ThirdPartyProvider.openai.defaultBaseURL
+    @Published var thirdPartyModel: String = ThirdPartyProvider.openai.defaultModel
+    @Published var thirdPartyAvailableModels: [String] = []
+    @Published var isFetchingModels: Bool = false
+    @Published var modelFetchError: String? = nil
 
     private var lastSavedGeminiModel: GeminiModel
     private var hasStartedCLICheck = false
@@ -862,6 +1153,14 @@ class ProviderSetupState: ObservableObject {
             return true
         case .terminalCommand(_), .modelDownload(_), .localChoice, .localModelInstall, .apiKeyInstructions:
             return true
+        case .thirdPartyProviderChoice:
+            return true // Always has a default selection
+        case .thirdPartyAPIKeyInput:
+            let trimmed = thirdPartyAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return false }
+            return thirdPartyProvider.validateKey(trimmed)
+        case .thirdPartyModelSelection:
+            return !thirdPartyModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
     }
     
@@ -925,6 +1224,14 @@ class ProviderSetupState: ObservableObject {
             claudeCLIReport = nil
             isCheckingCLIStatus = false
             hasStartedCLICheck = false
+        case "thirdparty":
+            steps = [
+                SetupStep(id: "choose_provider", title: "Choose provider", contentType: .thirdPartyProviderChoice),
+                SetupStep(id: "enterkey", title: "Enter API key", contentType: .thirdPartyAPIKeyInput),
+                SetupStep(id: "model", title: "Choose model", contentType: .thirdPartyModelSelection),
+                SetupStep(id: "test", title: "Test connection", contentType: .information("Test Connection", "Run a quick test to verify your API key and model work correctly.")),
+                SetupStep(id: "complete", title: "Complete", contentType: .information("All set!", "Your third-party AI provider is configured and ready to use with CodeBlog."))
+            ]
         default: // gemini
             steps = [
                 SetupStep(id: "getkey", title: "Get API key",
@@ -945,8 +1252,22 @@ class ProviderSetupState: ObservableObject {
             guard persistGeminiAPIKey(source: "onboarding_step") else { return }
         }
 
+        // Save third-party API key when leaving the key input step
+        if case .thirdPartyAPIKeyInput = currentStep.contentType {
+            let trimmed = thirdPartyAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                let keychainKey = ThirdPartyProviderDefaults.keychainKey(for: thirdPartyProvider)
+                _ = KeychainManager.shared.store(trimmed, for: keychainKey)
+            }
+        }
+
         if currentStepIndex < steps.count - 1 {
             currentStepIndex += 1
+
+            // Trigger model fetch when entering model selection step
+            if case .thirdPartyModelSelection = currentStep.contentType {
+                fetchThirdPartyModels()
+            }
         }
     }
     
@@ -1021,7 +1342,138 @@ class ProviderSetupState: ObservableObject {
         }
         return stored
     }
-    
+
+    func selectThirdPartyProvider(_ provider: ThirdPartyProvider) {
+        thirdPartyProvider = provider
+        thirdPartyBaseURL = provider.defaultBaseURL
+        thirdPartyModel = provider.defaultModel
+        thirdPartyAPIKey = ""
+        thirdPartyAvailableModels = []
+        modelFetchError = nil
+        hasTestedConnection = false
+        testSuccessful = false
+    }
+
+    func fetchThirdPartyModels() {
+        let trimmed = thirdPartyAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let baseURL = thirdPartyBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !baseURL.isEmpty else { return }
+
+        isFetchingModels = true
+        modelFetchError = nil
+
+        Task {
+            do {
+                // Build models endpoint URL, handling various base URL formats:
+                // "https://api.openai.com/v1" -> "https://api.openai.com/v1/models"
+                // "https://api.example.com" -> "https://api.example.com/v1/models"
+                // "https://api.example.com/" -> "https://api.example.com/v1/models"
+                var cleanBase = baseURL
+                while cleanBase.hasSuffix("/") { cleanBase.removeLast() }
+
+                let urlString: String
+                if cleanBase.hasSuffix("/v1") || cleanBase.contains("/v1/") {
+                    urlString = cleanBase.hasSuffix("/v1") ? "\(cleanBase)/models" : "\(cleanBase)models"
+                } else {
+                    urlString = "\(cleanBase)/v1/models"
+                }
+
+                guard let url = URL(string: urlString) else {
+                    await MainActor.run {
+                        self.isFetchingModels = false
+                        self.modelFetchError = "Invalid base URL"
+                    }
+                    return
+                }
+
+                var request = URLRequest(url: url)
+                request.timeoutInterval = 15
+
+                if thirdPartyProvider.usesAnthropicFormat {
+                    request.setValue(trimmed, forHTTPHeaderField: "x-api-key")
+                    request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+                } else {
+                    request.setValue("Bearer \(trimmed)", forHTTPHeaderField: "Authorization")
+                }
+
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                    await MainActor.run {
+                        self.isFetchingModels = false
+                        self.modelFetchError = "Failed to fetch models (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0))"
+                    }
+                    return
+                }
+
+                // Parse model list — try multiple response formats
+                let modelIds: [String] = Self.parseModelIds(from: data)
+
+                await MainActor.run {
+                    self.thirdPartyAvailableModels = modelIds
+                    self.isFetchingModels = false
+                    if modelIds.isEmpty {
+                        self.modelFetchError = "No models returned. You can type a model name manually."
+                    }
+                    // Auto-select default model if available
+                    if !modelIds.isEmpty && !modelIds.contains(self.thirdPartyModel) {
+                        let defaultModel = self.thirdPartyProvider.defaultModel
+                        if modelIds.contains(defaultModel) {
+                            self.thirdPartyModel = defaultModel
+                        } else {
+                            self.thirdPartyModel = modelIds.first ?? ""
+                        }
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    self.isFetchingModels = false
+                    self.modelFetchError = "Could not fetch models: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    /// Parse model IDs from various API response formats
+    private static func parseModelIds(from data: Data) -> [String] {
+        // Format 1: OpenAI standard {"data": [{"id": "model-name", ...}]}
+        struct OAIModelsResponse: Decodable {
+            let data: [OAIModelItem]?
+        }
+        struct OAIModelItem: Decodable {
+            let id: String
+        }
+        if let oai = try? JSONDecoder().decode(OAIModelsResponse.self, from: data),
+           let items = oai.data, !items.isEmpty {
+            return items.map(\.id).sorted()
+        }
+
+        // Format 2: Direct array [{"id": "model-name", ...}]
+        if let arr = try? JSONDecoder().decode([OAIModelItem].self, from: data), !arr.isEmpty {
+            return arr.map(\.id).sorted()
+        }
+
+        // Format 3: Anthropic {"data": [{"id": "model-name", "type": "model", ...}]}
+        // Same structure as OAI, already handled above
+
+        // Format 4: Simple array of strings ["model-a", "model-b"]
+        if let strings = try? JSONDecoder().decode([String].self, from: data), !strings.isEmpty {
+            return strings.sorted()
+        }
+
+        // Format 5: {"models": [{"id": "..."}]} or {"models": ["..."]}
+        struct AltModelsResponse: Decodable {
+            let models: [OAIModelItem]?
+        }
+        if let alt = try? JSONDecoder().decode(AltModelsResponse.self, from: data),
+           let items = alt.models, !items.isEmpty {
+            return items.map(\.id).sorted()
+        }
+
+        return []
+    }
+
     private var isSelectedCLIToolReady: Bool {
         guard let preferredCLITool else { return false }
         return isToolAvailable(preferredCLITool)
@@ -1160,14 +1612,17 @@ enum StepContentType {
     case localChoice
     case localModelInstall
     case cliDetection
-    
+    case thirdPartyProviderChoice
+    case thirdPartyAPIKeyInput
+    case thirdPartyModelSelection
+
     var isApiKeyInput: Bool {
         if case .apiKeyInput = self {
             return true
         }
         return false
     }
-    
+
     var informationTitle: String? {
         if case .information(let title, _) = self {
             return title
@@ -2184,6 +2639,289 @@ struct ChatCLIToolStatusRow: View {
             return "Setup guide"
         default:
             return "Install"
+        }
+    }
+}
+
+// MARK: - Third-Party Model List View
+
+struct ThirdPartyModelListView: View {
+    let models: [String]
+    @Binding var selectedModel: String
+    @State private var searchText: String = ""
+
+    private var filteredModels: [String] {
+        if searchText.isEmpty { return models }
+        let query = searchText.lowercased()
+        return models.filter { $0.lowercased().contains(query) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Available models (\(models.count))")
+                .font(.custom("Nunito", size: 14))
+                .fontWeight(.semibold)
+                .foregroundColor(.black.opacity(0.75))
+
+            // Search field
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.black.opacity(0.35))
+                    .font(.system(size: 12))
+                TextField("Search models...", text: $searchText)
+                    .font(.custom("Nunito", size: 13))
+                    .textFieldStyle(.plain)
+                if !searchText.isEmpty {
+                    Button(action: { searchText = "" }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.black.opacity(0.3))
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.white.opacity(0.8))
+            .cornerRadius(8)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.black.opacity(0.1), lineWidth: 1)
+            )
+
+            // Model list
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(filteredModels, id: \.self) { model in
+                        Button(action: { selectedModel = model }) {
+                            HStack(spacing: 10) {
+                                Image(systemName: selectedModel == model ? "checkmark.circle.fill" : "circle")
+                                    .foregroundColor(selectedModel == model ? Color(red: 1, green: 0.42, blue: 0.02) : .black.opacity(0.2))
+                                    .font(.system(size: 14))
+
+                                Text(model)
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .foregroundColor(.black.opacity(0.85))
+                                    .lineLimit(1)
+
+                                Spacer()
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(
+                                selectedModel == model
+                                    ? Color(red: 1, green: 0.42, blue: 0.02).opacity(0.08)
+                                    : Color.clear
+                            )
+                            .cornerRadius(6)
+                        }
+                        .buttonStyle(.plain)
+                        .pointingHandCursor()
+                    }
+
+                    if filteredModels.isEmpty && !searchText.isEmpty {
+                        Text("No models matching \"\(searchText)\"")
+                            .font(.custom("Nunito", size: 13))
+                            .foregroundColor(.black.opacity(0.4))
+                            .padding(.vertical, 12)
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .frame(maxHeight: 260)
+            .background(Color.white.opacity(0.6))
+            .cornerRadius(8)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.black.opacity(0.1), lineWidth: 1)
+            )
+        }
+    }
+}
+
+// MARK: - Third-Party Test Connection View
+
+struct ThirdPartyTestConnectionView: View {
+    let provider: ThirdPartyProvider
+    let apiKey: String
+    let baseURL: String
+    let model: String
+    let onTestComplete: (Bool) -> Void
+
+    @State private var isTesting = false
+    @State private var testResult: TestResult? = nil
+    @State private var resultMessage: String = ""
+
+    private enum TestResult {
+        case success, failure
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Test button
+            CodeBlogSurfaceButton(
+                action: runTest,
+                content: {
+                    HStack(spacing: 8) {
+                        if isTesting {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                                .frame(width: 14, height: 14)
+                        } else if testResult == .success {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 14))
+                        } else {
+                            Image(systemName: "bolt.fill")
+                                .font(.system(size: 14))
+                        }
+
+                        Text(buttonTitle)
+                            .font(.custom("Nunito", size: 14))
+                            .fontWeight(.semibold)
+                    }
+                },
+                background: testResult == .success
+                    ? Color(red: 0.34, green: 1, blue: 0.45).opacity(0.2)
+                    : Color(red: 0.25, green: 0.17, blue: 0),
+                foreground: testResult == .success ? .black : .white,
+                borderColor: testResult == .success ? Color(red: 0.34, green: 1, blue: 0.45).opacity(0.5) : .clear,
+                cornerRadius: 8,
+                horizontalPadding: 24,
+                verticalPadding: 12,
+                showOverlayStroke: testResult != .success
+            )
+            .disabled(isTesting)
+
+            // Result message
+            if !resultMessage.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: testResult == .success ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundColor(testResult == .success ? .green : Color(hex: "E91515"))
+                        .font(.system(size: 14))
+                    Text(resultMessage)
+                        .font(.custom("Nunito", size: 13))
+                        .foregroundColor(testResult == .success ? .black.opacity(0.7) : Color(hex: "E91515"))
+                }
+                .padding(12)
+                .background(
+                    testResult == .success
+                        ? Color(red: 0.34, green: 1, blue: 0.45).opacity(0.1)
+                        : Color(hex: "E91515").opacity(0.1)
+                )
+                .cornerRadius(8)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(
+                            testResult == .success
+                                ? Color(red: 0.34, green: 1, blue: 0.45).opacity(0.3)
+                                : Color(hex: "E91515").opacity(0.3),
+                            lineWidth: 1
+                        )
+                )
+            }
+        }
+    }
+
+    private var buttonTitle: String {
+        if isTesting { return "Testing connection..." }
+        if testResult == .success { return "Test Successful!" }
+        if testResult == .failure { return "Test Failed - Try Again" }
+        return "Test Connection"
+    }
+
+    private func runTest() {
+        isTesting = true
+        testResult = nil
+        resultMessage = ""
+
+        Task {
+            do {
+                let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                let trimmedURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                if provider.usesAnthropicFormat {
+                    try await testAnthropic(apiKey: trimmedKey, baseURL: trimmedURL, model: model)
+                } else {
+                    try await testOpenAICompatible(apiKey: trimmedKey, baseURL: trimmedURL, model: model)
+                }
+
+                await MainActor.run {
+                    isTesting = false
+                    testResult = .success
+                    resultMessage = "Connection successful! \(provider.displayName) is ready to use."
+                    onTestComplete(true)
+                }
+            } catch {
+                await MainActor.run {
+                    isTesting = false
+                    testResult = .failure
+                    resultMessage = error.localizedDescription
+                    onTestComplete(false)
+                }
+            }
+        }
+    }
+
+    private func testOpenAICompatible(apiKey: String, baseURL: String, model: String) async throws {
+        let urlString = baseURL.hasSuffix("/") ? "\(baseURL)chat/completions" : "\(baseURL)/chat/completions"
+        guard let url = URL(string: urlString) else {
+            throw URLError(.badURL)
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 15
+
+        let body: [String: Any] = [
+            "model": model,
+            "messages": [["role": "user", "content": "Say hello in one word."]],
+            "max_tokens": 10
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+
+        if httpResponse.statusCode != 200 {
+            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw NSError(domain: "ThirdPartyTest", code: httpResponse.statusCode,
+                         userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResponse.statusCode): \(errorBody.prefix(200))"])
+        }
+    }
+
+    private func testAnthropic(apiKey: String, baseURL: String, model: String) async throws {
+        let urlString = baseURL.hasSuffix("/") ? "\(baseURL)messages" : "\(baseURL)/messages"
+        guard let url = URL(string: urlString) else {
+            throw URLError(.badURL)
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 15
+
+        let body: [String: Any] = [
+            "model": model,
+            "messages": [["role": "user", "content": "Say hello in one word."]],
+            "max_tokens": 10
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+
+        if httpResponse.statusCode != 200 {
+            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw NSError(domain: "ThirdPartyTest", code: httpResponse.statusCode,
+                         userInfo: [NSLocalizedDescriptionKey: "HTTP \(httpResponse.statusCode): \(errorBody.prefix(200))"])
         }
     }
 }

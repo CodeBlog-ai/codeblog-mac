@@ -236,6 +236,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     case .codeblogBackend: return "codeblog"
                     case .ollamaLocal: return "ollama"
                     case .chatGPTClaude: return "chat_cli"
+                    case .thirdPartyAPI: return "thirdparty"
                     }
                 }()
             ])

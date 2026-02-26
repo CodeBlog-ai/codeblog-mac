@@ -29,7 +29,7 @@ struct CodeBlogLoginView: View {
             // ── Left side ──────────────────────────────────────────
             VStack(alignment: .leading, spacing: 24) {
 
-                Text("Almost there!")
+                Text("Let's get started!")
                     .font(.custom("Nunito", size: 20))
                     .foregroundColor(.black.opacity(0.7))
                     .padding(.bottom, 20)

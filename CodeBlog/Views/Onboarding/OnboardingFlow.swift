@@ -45,7 +45,7 @@ struct OnboardingFlow: View {
                 
             case .howItWorks:
                 HowItWorksView(
-                    onBack: { 
+                    onBack: {
                         setStep(.welcome)
                     },
                     onNext: { advance() }
@@ -55,11 +55,24 @@ struct OnboardingFlow: View {
                     restoreSavedStep()
                     AnalyticsService.shared.screen("onboarding_how_it_works")
                 }
-                
+
+            case .login:
+                CodeBlogLoginView(
+                    onBack: {
+                        setStep(.howItWorks)
+                    },
+                    onNext: { advance() }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .onAppear {
+                    restoreSavedStep()
+                    AnalyticsService.shared.screen("onboarding_login")
+                }
+
             case .llmSelection:
                 OnboardingLLMSelectionView(
-                    onBack: { 
-                        setStep(.howItWorks)
+                    onBack: {
+                        setStep(.login)
                     },
                     onNext: { provider in
                         selectedProvider = provider
@@ -108,19 +121,6 @@ struct OnboardingFlow: View {
                 .onAppear {
                     restoreSavedStep()
                     AnalyticsService.shared.screen("onboarding_categories")
-                }
-
-            case .login:
-                CodeBlogLoginView(
-                    onBack: {
-                        setStep(.categories)
-                    },
-                    onNext: { advance() }
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .onAppear {
-                    restoreSavedStep()
-                    AnalyticsService.shared.screen("onboarding_login")
                 }
 
             case .screen:
@@ -198,11 +198,15 @@ struct OnboardingFlow: View {
         }
 
         switch step {
-        case .welcome:      
+        case .welcome:
             markStepCompleted(step)
             step.next()
             savedStepRawValue = step.rawValue
-        case .howItWorks:   
+        case .howItWorks:
+            markStepCompleted(step)
+            step.next()
+            savedStepRawValue = step.rawValue
+        case .login:
             markStepCompleted(step)
             step.next()
             savedStepRawValue = step.rawValue
@@ -215,10 +219,6 @@ struct OnboardingFlow: View {
             step.next()
             savedStepRawValue = step.rawValue
         case .categories:
-            markStepCompleted(step)
-            step.next()
-            savedStepRawValue = step.rawValue
-        case .login:
             markStepCompleted(step)
             step.next()
             savedStepRawValue = step.rawValue
@@ -256,7 +256,7 @@ struct OnboardingFlow: View {
 
 /// Wizard step order
 private enum Step: Int, CaseIterable {
-    case welcome, howItWorks, llmSelection, llmSetup, categories, login, screen, completion
+    case welcome, howItWorks, login, llmSelection, llmSetup, categories, screen, completion
 
     mutating func next() { self = Step(rawValue: rawValue + 1)! }
 }
@@ -264,7 +264,7 @@ private enum Step: Int, CaseIterable {
 enum OnboardingStepMigration {
     static let schemaVersionKey = "onboardingStepSchemaVersion"
     private static let onboardingStepKey = "onboardingStep"
-    static let currentVersion = 1
+    static let currentVersion = 2
 
     @discardableResult
     static func migrateIfNeeded(defaults: UserDefaults = .standard) -> Int {
@@ -274,21 +274,45 @@ enum OnboardingStepMigration {
             return rawValue
         }
 
-        let migratedValue = migrateRawValue(rawValue)
+        let migratedValue: Int
+        if storedVersion == 0 {
+            // Legacy (pre-v1) → v2: original order was different
+            migratedValue = migrateFromV0(rawValue)
+        } else {
+            // v1 → v2: login moved from position 5 to position 2
+            migratedValue = migrateFromV1(rawValue)
+        }
         defaults.set(migratedValue, forKey: onboardingStepKey)
         defaults.set(currentVersion, forKey: schemaVersionKey)
         return migratedValue
     }
 
-    static func migrateRawValue(_ rawValue: Int) -> Int {
+    /// v1 step order: welcome(0), howItWorks(1), llmSelection(2), llmSetup(3), categories(4), login(5), screen(6), completion(7)
+    /// v2 step order: welcome(0), howItWorks(1), login(2), llmSelection(3), llmSetup(4), categories(5), screen(6), completion(7)
+    private static func migrateFromV1(_ rawValue: Int) -> Int {
+        switch rawValue {
+        case 0: return 0         // welcome → welcome
+        case 1: return 1         // howItWorks → howItWorks
+        case 2: return 3         // llmSelection → llmSelection
+        case 3: return 4         // llmSetup → llmSetup
+        case 4: return 5         // categories → categories
+        case 5: return 2         // login → login (moved earlier)
+        case 6: return 6         // screen → screen
+        case 7: return 7         // completion → completion
+        default: return 0
+        }
+    }
+
+    /// Legacy (pre-v1) migration directly to v2
+    private static func migrateFromV0(_ rawValue: Int) -> Int {
         switch rawValue {
         case 0: return 0         // welcome
         case 1: return 1         // how it works
-        case 2: return 5         // legacy screen step moves after categories
-        case 3: return 2         // llm selection
-        case 4: return 3         // llm setup
-        case 5: return 4         // categories
-        case 6: return 6         // completion
+        case 2: return 6         // legacy screen step → screen
+        case 3: return 3         // llm selection
+        case 4: return 4         // llm setup
+        case 5: return 5         // categories
+        case 6: return 7         // completion
         default: return 0
         }
     }

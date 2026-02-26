@@ -21,6 +21,8 @@ struct OnboardingLLMSelectionView: View {
     @State private var cliDetected: Bool = false
     @State private var cliDetectionTask: Task<Void, Never>?
     @State private var didUserSelectProvider: Bool = false
+    @State private var creditBalanceUSD: String? = nil
+    @State private var creditCheckOpacity: Double = 0
     
     var body: some View {
         GeometryReader { geometry in
@@ -30,8 +32,8 @@ struct OnboardingLLMSelectionView: View {
             // Constants
             let edgePadding: CGFloat = 40
             let cardGap: CGFloat = 20
-            let headerHeight: CGFloat = 70
-            let footerHeight: CGFloat = 40
+            let headerHeight: CGFloat = creditBalanceUSD != nil ? 100 : 70
+            let footerHeight: CGFloat = 70
 
             // Card width calc (no min width, cap at 480)
             let availableWidth = windowWidth - (edgePadding * 2)
@@ -47,20 +49,40 @@ struct OnboardingLLMSelectionView: View {
 
             VStack(spacing: 0) {
                 // Header
+                VStack(spacing: 6) {
                     Text("Choose a way to run CodeBlog")
-                    .font(.custom("InstrumentSerif-Regular", size: titleSize))
-                    .multilineTextAlignment(.center)
-                    .foregroundColor(.black.opacity(0.9))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: headerHeight)
-                    .opacity(titleOpacity)
-                    .onAppear {
-                        guard !hasAppeared else { return }
-                        hasAppeared = true
-                        detectCLIInstallation()
-                        withAnimation(.easeOut(duration: 0.6)) { titleOpacity = 1 }
-                        animateContent()
+                        .font(.custom("InstrumentSerif-Regular", size: titleSize))
+                        .multilineTextAlignment(.center)
+                        .foregroundColor(.black.opacity(0.9))
+                        .frame(maxWidth: .infinity)
+
+                    // Credit balance prompt
+                    if let balance = creditBalanceUSD {
+                        HStack(spacing: 4) {
+                            Text("You have")
+                                .foregroundColor(.black.opacity(0.6))
+                            + Text(" $\(balance) ")
+                                .fontWeight(.semibold)
+                                .foregroundColor(Color(red: 0.2, green: 0.7, blue: 0.3))
+                            + Text("in AI credits — you can use CodeBlog's built-in AI at no extra cost.")
+                                .foregroundColor(.black.opacity(0.6))
+                        }
+                        .font(.custom("Nunito", size: 13))
+                        .multilineTextAlignment(.center)
+                        .opacity(creditCheckOpacity)
                     }
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: headerHeight)
+                .opacity(titleOpacity)
+                .onAppear {
+                    guard !hasAppeared else { return }
+                    hasAppeared = true
+                    detectCLIInstallation()
+                    checkCreditBalance()
+                    withAnimation(.easeOut(duration: 0.6)) { titleOpacity = 1 }
+                    animateContent()
+                }
 
                 // Dynamic card area
                 Spacer(minLength: 10)
@@ -77,28 +99,39 @@ struct OnboardingLLMSelectionView: View {
                 Spacer(minLength: 10)
 
                 // Footer
-                HStack(spacing: 0) {
-                    Group {
-                        if cliDetected {
-                            Text("You have Codex/Claude CLI installed! ")
-                                .foregroundColor(.black.opacity(0.6))
-                            + Text("We recommend using it for the best experience.")
-                                .fontWeight(.semibold)
-                                .foregroundColor(.black.opacity(0.8))
-                            + Text(" You can switch at any time in the settings.")
-                                .foregroundColor(.black.opacity(0.6))
-                        } else {
-                            Text("Not sure which to choose? ")
-                                .foregroundColor(.black.opacity(0.6))
-                            + Text("Bring your own keys is the easiest setup (30s).")
-                                .fontWeight(.semibold)
-                                .foregroundColor(.black.opacity(0.8))
-                            + Text(" You can switch at any time in the settings.")
-                                .foregroundColor(.black.opacity(0.6))
+                VStack(spacing: 8) {
+                    HStack(spacing: 0) {
+                        Group {
+                            if cliDetected {
+                                Text("You have Codex/Claude CLI installed! ")
+                                    .foregroundColor(.black.opacity(0.6))
+                                + Text("We recommend using it for the best experience.")
+                                    .fontWeight(.semibold)
+                                    .foregroundColor(.black.opacity(0.8))
+                                + Text(" You can switch at any time in the settings.")
+                                    .foregroundColor(.black.opacity(0.6))
+                            } else {
+                                Text("Not sure which to choose? ")
+                                    .foregroundColor(.black.opacity(0.6))
+                                + Text("Bring your own keys is the easiest setup (30s).")
+                                    .fontWeight(.semibold)
+                                    .foregroundColor(.black.opacity(0.8))
+                                + Text(" You can switch at any time in the settings.")
+                                    .foregroundColor(.black.opacity(0.6))
+                            }
                         }
+                        .font(.custom("Nunito", size: 14))
+                        .multilineTextAlignment(.center)
                     }
-                    .font(.custom("Nunito", size: 14))
-                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+
+                    Button(action: { onNext("thirdparty") }) {
+                        Text("Looking for OpenAI, Anthropic, or other providers? Configure here →")
+                            .font(.custom("Nunito", size: 13))
+                            .foregroundColor(Color(red: 1, green: 0.42, blue: 0.02))
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
                 }
                 .frame(maxWidth: .infinity)
                 .frame(height: footerHeight)
@@ -263,7 +296,7 @@ struct OnboardingLLMSelectionView: View {
     
     private func saveProviderSelection() {
         let providerType: LLMProviderType
-        
+
         switch selectedProvider {
         case "ollama":
             providerType = .ollamaLocal()
@@ -273,10 +306,13 @@ struct OnboardingLLMSelectionView: View {
             providerType = .codeblogBackend()
         case "chatgpt_claude":
             providerType = .chatGPTClaude
+        case "thirdparty":
+            // Don't persist yet — will be done in the setup view after configuration
+            return
         default:
             providerType = .geminiDirect
         }
-        
+
         providerType.persist()
     }
     
@@ -309,6 +345,38 @@ struct OnboardingLLMSelectionView: View {
 
             if !didUserSelectProvider {
                 selectedProvider = installed ? "chatgpt_claude" : "gemini"
+            }
+        }
+    }
+
+    private func checkCreditBalance() {
+        let auth = CodeBlogAuthService.shared
+        guard auth.isAuthenticated, let apiKey = auth.token?.apiKey else { return }
+
+        Task {
+            do {
+                var request = URLRequest(url: URL(string: "https://codeblog.ai/api/v1/ai-credit/balance")!)
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                request.timeoutInterval = 5
+
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else { return }
+
+                struct CreditBalanceResponse: Decodable {
+                    let balance_cents: Int
+                    let balance_usd: String
+                }
+                let balance = try JSONDecoder().decode(CreditBalanceResponse.self, from: data)
+                guard balance.balance_cents > 0 else { return }
+
+                await MainActor.run {
+                    creditBalanceUSD = balance.balance_usd
+                    withAnimation(.easeOut(duration: 0.5).delay(0.5)) {
+                        creditCheckOpacity = 1
+                    }
+                }
+            } catch {
+                // Silently fail — don't show credit info if check fails
             }
         }
     }

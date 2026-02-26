@@ -223,6 +223,12 @@ final class LLMService: LLMServicing {
                 transcribeScreenshots: provider.transcribeScreenshots,
                 generateActivityCards: provider.generateActivityCards
             ), fallbackState: nil)
+        case .thirdPartyAPI:
+            guard let provider = ThirdPartyAPIProvider.fromDefaults() else { throw noProviderError() }
+            return (actions: BatchProviderActions(
+                transcribeScreenshots: provider.transcribeScreenshots,
+                generateActivityCards: provider.generateActivityCards
+            ), fallbackState: nil)
         }
     }
 
@@ -473,6 +479,12 @@ final class LLMService: LLMServicing {
             return TextProviderActions(
                 generateText: provider.generateText,
                 generateTextStreaming: provider.generateTextStreaming
+            )
+        case .thirdPartyAPI:
+            guard let provider = ThirdPartyAPIProvider.fromDefaults() else { throw noProviderError() }
+            return TextProviderActions(
+                generateText: provider.generateText,
+                generateTextStreaming: nil
             )
         }
     }

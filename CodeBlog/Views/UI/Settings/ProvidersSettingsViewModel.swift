@@ -224,6 +224,8 @@ final class ProvidersSettingsViewModel: ObservableObject {
             currentProvider = "ollama"
         case .chatGPTClaude:
             currentProvider = "chatgpt_claude"
+        case .thirdPartyAPI:
+            currentProvider = "thirdparty"
         }
         hasLoadedProvider = true
     }
@@ -429,6 +431,11 @@ final class ProvidersSettingsViewModel: ObservableObject {
             let preferredTool = (UserDefaults.standard.string(forKey: "chatCLIPreferredTool") ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             return !preferredTool.isEmpty
+        case "thirdparty":
+            if UserDefaults.standard.bool(forKey: "thirdpartySetupComplete") {
+                return true
+            }
+            return ThirdPartyAPIProvider.fromDefaults() != nil
         default:
             return false
         }
@@ -479,6 +486,11 @@ final class ProvidersSettingsViewModel: ObservableObject {
             providerType = .codeblogBackend()
         case "chatgpt_claude":
             providerType = .chatGPTClaude
+        case "thirdparty":
+            guard let kind = ThirdPartyProvider(rawValue: UserDefaults.standard.string(forKey: ThirdPartyProviderDefaults.providerKindKey) ?? "") else { return }
+            let endpoint = UserDefaults.standard.string(forKey: ThirdPartyProviderDefaults.baseURLKey) ?? kind.defaultBaseURL
+            let model = UserDefaults.standard.string(forKey: ThirdPartyProviderDefaults.modelKey) ?? kind.defaultModel
+            providerType = .thirdPartyAPI(provider: kind, endpoint: endpoint, model: model)
         default:
             return
         }
@@ -603,6 +615,14 @@ final class ProvidersSettingsViewModel: ObservableObject {
                 badgeText: "NEW",
                 badgeType: .blue,
                 icon: "ClaudeLogo"
+            ),
+            CompactProviderInfo(
+                id: "thirdparty",
+                title: "Third-Party API",
+                summary: "OpenAI, Anthropic, OpenRouter, Groq, or custom endpoint",
+                badgeText: "ADVANCED",
+                badgeType: .blue,
+                icon: "server.rack"
             )
         ]
     }
@@ -632,6 +652,13 @@ final class ProvidersSettingsViewModel: ObservableObject {
                 return "Claude Code CLI"
             }
             return chatCLIStatusLabel()
+        case "thirdparty":
+            if let kindRaw = UserDefaults.standard.string(forKey: ThirdPartyProviderDefaults.providerKindKey),
+               let kind = ThirdPartyProvider(rawValue: kindRaw) {
+                let model = UserDefaults.standard.string(forKey: ThirdPartyProviderDefaults.modelKey) ?? kind.defaultModel
+                return "\(kind.displayName) – \(model)"
+            }
+            return "Third-Party API"
         default:
             return nil
         }
@@ -660,6 +687,12 @@ final class ProvidersSettingsViewModel: ObservableObject {
                 return "\(tool.shortName) CLI"
             }
             return "ChatGPT / Claude CLI"
+        case "thirdparty":
+            if let kindRaw = UserDefaults.standard.string(forKey: ThirdPartyProviderDefaults.providerKindKey),
+               let kind = ThirdPartyProvider(rawValue: kindRaw) {
+                return "\(kind.displayName) API"
+            }
+            return "Third-Party API"
         default:
             return "Diagnostics"
         }
@@ -677,6 +710,12 @@ final class ProvidersSettingsViewModel: ObservableObject {
             }
             return "ChatGPT or Claude"
         case "codeblog": return "CodeBlog Pro"
+        case "thirdparty":
+            if let kindRaw = UserDefaults.standard.string(forKey: ThirdPartyProviderDefaults.providerKindKey),
+               let kind = ThirdPartyProvider(rawValue: kindRaw) {
+                return kind.displayName
+            }
+            return "Third-Party API"
         default: return id.capitalized
         }
     }
@@ -885,6 +924,7 @@ struct CompactProviderInfo: Identifiable {
         case "chatgpt": return "ChatGPT"
         case "claude": return "Claude"
         case "chatgpt_claude": return "ChatGPT / Claude"
+        case "thirdparty": return "Third-Party API"
         default: return title
         }
     }
