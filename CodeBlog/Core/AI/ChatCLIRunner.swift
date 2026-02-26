@@ -215,12 +215,18 @@ private struct ClaudeJSONLEvent: Decodable {
     struct ClaudeEvent: Decodable {
         let type: String
         let delta: ClaudeDelta?
+        let content_block: ClaudeContentBlock?
     }
 
     struct ClaudeDelta: Decodable {
         let type: String?
         let text: String?
         let thinking: String?
+    }
+
+    struct ClaudeContentBlock: Decodable {
+        let type: String?
+        let name: String?  // tool name for tool_use blocks
     }
 }
 
@@ -298,6 +304,9 @@ struct ChatCLIProcessRunner {
             if let effort = reasoningEffort { cmdParts.append(contentsOf: ["-c", "model_reasoning_effort=\(effort)"]) }
             let mcpServers = LoginShellRunner.getCodexMCPServerNames()
             for serverName in mcpServers {
+                if serverName.lowercased() == "codeblog" {
+                    continue
+                }
                 cmdParts.append(contentsOf: ["--config", "mcp_servers.\(serverName).enabled=false"])
             }
             cmdParts.append(contentsOf: ["-c", "rmcp_client=false", "-c", "web_search=disabled"])
@@ -325,6 +334,7 @@ struct ChatCLIProcessRunner {
         let process = Process()
         process.executableURL = shell
         process.arguments = ["-l", "-i", "-c", shellCommand]
+        process.environment = cliEnvironment()
         var cleanupPty: (() -> Void)?
         let stdoutHandle: FileHandle
         if tool == .claude {
@@ -350,6 +360,7 @@ struct ChatCLIProcessRunner {
         var lineBuffer = Data()
         var sawTextDelta = false
         var didYieldComplete = false
+        var hasActiveToolCall = false  // Track if a tool is currently running (for Claude)
 
         stdoutHandle.readabilityHandler = { handle in
             let data = handle.availableData
@@ -367,6 +378,24 @@ struct ChatCLIProcessRunner {
                 guard !line.isEmpty else { continue }
 
                 if let event = self.parseJSONLLine(tool: tool, line: line) {
+                    // Auto-close tool call when text starts arriving (Claude mode)
+                    if case .textDelta(_) = event, hasActiveToolCall {
+                        continuation.yield(.toolEnd(output: "", exitCode: 0))
+                        hasActiveToolCall = false
+                    }
+
+                    if case .toolStart(_) = event {
+                        // Close previous tool if still active
+                        if hasActiveToolCall {
+                            continuation.yield(.toolEnd(output: "", exitCode: 0))
+                        }
+                        hasActiveToolCall = true
+                    }
+
+                    if case .toolEnd(_, _) = event {
+                        hasActiveToolCall = false
+                    }
+
                     if case .textDelta(let text) = event {
                         sawTextDelta = true
                         accumulatedText += text
@@ -441,6 +470,18 @@ struct ChatCLIProcessRunner {
         continuation.finish()
     }
 
+    private func cliEnvironment() -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+
+        if let apiKey = KeychainManager.shared.retrieve(for: "codeblog")?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !apiKey.isEmpty {
+            environment["CODEBLOG_API_KEY"] = apiKey
+        }
+
+        return environment
+    }
+
     private func parseJSONLLine(tool: ChatCLITool, line: String) -> ChatStreamEvent? {
         guard let data = line.data(using: .utf8) else { return nil }
 
@@ -495,6 +536,17 @@ struct ChatCLIProcessRunner {
         }
 
         if event.type == "stream_event", let streamEvent = event.event {
+            // Tool use start: content_block_start with tool_use type
+            if streamEvent.type == "content_block_start",
+               let block = streamEvent.content_block,
+               block.type == "tool_use",
+               let toolName = block.name {
+                return .toolStart(command: toolName)
+            }
+
+            // Tool result: content_block_stop after a tool_use block is handled implicitly
+            // Claude CLI emits the tool result as a separate event after execution
+
             if streamEvent.type == "content_block_delta", let delta = streamEvent.delta {
                 if delta.type == "thinking_delta", let thinking = delta.thinking, !thinking.isEmpty {
                     return .thinking(thinking)
@@ -502,6 +554,13 @@ struct ChatCLIProcessRunner {
                 if delta.type == "text_delta", let text = delta.text, !text.isEmpty {
                     return .textDelta(text)
                 }
+            }
+
+            // content_block_stop for tool_use → tool execution completed
+            if streamEvent.type == "content_block_stop" {
+                // This fires when a content block (including tool_use) is done
+                // We'll let the next text or tool event continue the flow
+                return nil
             }
         }
 
@@ -601,6 +660,9 @@ struct ChatCLIProcessRunner {
             if let effort = reasoningEffort { cmdParts.append(contentsOf: ["-c", "model_reasoning_effort=\(effort)"]) }
             let mcpServers = LoginShellRunner.getCodexMCPServerNames()
             for serverName in mcpServers {
+                if serverName.lowercased() == "codeblog" {
+                    continue
+                }
                 cmdParts.append(contentsOf: ["--config", "mcp_servers.\(serverName).enabled=false"])
             }
             cmdParts.append(contentsOf: ["-c", "rmcp_client=false", "-c", "web_search=disabled"])
@@ -628,6 +690,7 @@ struct ChatCLIProcessRunner {
         let process = Process()
         process.executableURL = shell
         process.arguments = ["-l", "-i", "-c", shellCommand]
+        process.environment = cliEnvironment()
 
         var cleanupPty: (() -> Void)?
         let stdoutHandle: FileHandle

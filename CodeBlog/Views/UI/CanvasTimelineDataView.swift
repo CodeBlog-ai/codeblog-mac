@@ -579,7 +579,7 @@ struct CanvasTimelineDataView: View {
     }
 
     // Normalize a domain or URL-like string to just the host
-    private func normalizeHost(_ site: String?) -> String? {
+    private nonisolated func normalizeHost(_ site: String?) -> String? {
         guard var site = site, !site.isEmpty else { return nil }
         site = site.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if let url = URL(string: site), url.host != nil {
@@ -599,7 +599,7 @@ struct CanvasTimelineDataView: View {
         return nil
     }
 
-    private func processTimelineCards(_ cards: [TimelineCard], for date: Date) -> [TimelineActivity] {
+    private nonisolated func processTimelineCards(_ cards: [TimelineCard], for date: Date) -> [TimelineActivity] {
         let calendar = Calendar.current
         let baseDate = calendar.startOfDay(for: date)
 
@@ -695,7 +695,7 @@ struct CanvasTimelineDataView: View {
         var end: Date
     }
 
-    private func resolveOverlapsForDisplay(_ activities: [TimelineActivity]) -> [DisplaySegment] {
+    private nonisolated func resolveOverlapsForDisplay(_ activities: [TimelineActivity]) -> [DisplaySegment] {
         // Start with raw segments mirroring activity times
         var segments = activities.map { DisplaySegment(activity: $0, start: $0.startTime, end: $0.endTime) }
         guard segments.count > 1 else { return segments }
@@ -787,7 +787,7 @@ struct CanvasTimelineDataView: View {
         return max(10, rawHeight - 2)
     }
 
-    private func computeRecordingProjectionWindow(
+    private nonisolated func computeRecordingProjectionWindow(
         timelineDate: Date,
         displaySegments: [DisplaySegment],
         now: Date
@@ -799,7 +799,6 @@ struct CanvasTimelineDataView: View {
         let dayEnd = dayInfo.endOfDay
         let cycleDuration: TimeInterval = 15 * 60
         let hardCap: TimeInterval = 40 * 60
-        guard cycleDuration > 0 else { return nil }
 
         let centeredStart = now.addingTimeInterval(-(cycleDuration / 2))
         var windowStart = max(dayStart, centeredStart)
@@ -871,7 +870,7 @@ struct CanvasTimelineDataView: View {
         refreshTimer = nil
     }
 
-    private func calculateYPosition(for time: Date) -> CGFloat {
+    private nonisolated func calculateYPosition(for time: Date) -> CGFloat {
         let calendar = Calendar.current
         let hour = calendar.component(.hour, from: time)
         let minute = calendar.component(.minute, from: time)
@@ -895,7 +894,7 @@ struct CanvasTimelineDataView: View {
         return "\(adjustedHour):00 \(period)"
     }
 
-    private func formatRange(start: Date, end: Date) -> String {
+    private nonisolated func formatRange(start: Date, end: Date) -> String {
         let s = cachedTimeFormatter.string(from: start)
         let e = cachedTimeFormatter.string(from: end)
         return "\(s) - \(e)"

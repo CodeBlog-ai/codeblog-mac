@@ -5,7 +5,6 @@
 
 import Foundation
 import SwiftUI
-import ScreenCaptureKit
 
 // Window manager removed - no longer needed!
 
@@ -111,6 +110,7 @@ struct OnboardingFlow: View {
                 }
                 
             case .categories:
+                // HIDDEN: Categories step is temporarily skipped.
                 OnboardingCategorySetupView(
                     onNext: {
                         advance()
@@ -124,9 +124,14 @@ struct OnboardingFlow: View {
                 }
 
             case .screen:
+                // HIDDEN: Screen recording permission step is temporarily skipped.
                 ScreenRecordingPermissionView(
                     onBack: { 
-                        setStep(.categories)
+                        if selectedProvider == "codeblog" {
+                            setStep(.llmSelection)
+                        } else {
+                            setStep(.llmSetup)
+                        }
                     },
                     onNext: { advance() }
                 )
@@ -137,11 +142,13 @@ struct OnboardingFlow: View {
                 }
                 
             case .completion:
-                CompletionView(
+                OnboardingAgentSetupView(
                     onFinish: {
                         // Create sample card BEFORE switching views (sync write)
                         StorageManager.shared.createOnboardingCard()
 
+                        UserDefaults.standard.set(true, forKey: "isFirstLaunchAfterOnboarding")
+                        UserDefaults.standard.set(true, forKey: "shouldAutoScanAfterOnboarding")
                         didOnboard = true
                         savedStepRawValue = 0
                         AnalyticsService.shared.capture("onboarding_completed")
@@ -151,7 +158,7 @@ struct OnboardingFlow: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .onAppear {
                     restoreSavedStep()
-                    AnalyticsService.shared.screen("onboarding_completion")
+                    AnalyticsService.shared.screen("onboarding_agent_setup")
                 }
             }
         }
@@ -212,39 +219,17 @@ struct OnboardingFlow: View {
             savedStepRawValue = step.rawValue
         case .llmSelection:
             markStepCompleted(step)
-            let nextStep: Step = (selectedProvider == "codeblog") ? .categories : .llmSetup
+            let nextStep: Step = (selectedProvider == "codeblog") ? .completion : .llmSetup
             setStep(nextStep)
         case .llmSetup:
             markStepCompleted(step)
-            step.next()
-            savedStepRawValue = step.rawValue
+            setStep(.completion)
         case .categories:
             markStepCompleted(step)
-            step.next()
-            savedStepRawValue = step.rawValue
+            setStep(.completion)
         case .screen:
-            // Permission request is handled by ScreenRecordingPermissionView itself
             markStepCompleted(step)
-            step.next()
-            savedStepRawValue = step.rawValue
-            
-            // Only try to start recording if we already have permission
-            if CGPreflightScreenCaptureAccess() {
-                Task {
-                    do {
-                        // Verify we have permission
-                        _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-                        // Start recording
-                        await MainActor.run {
-                            AppState.shared.isRecording = true
-                        }
-                    } catch {
-                        // Permission not granted yet, that's ok
-                        // It will start after restart
-                        print("Will start recording after restart")
-                    }
-                }
-            }
+            setStep(.completion)
         case .completion:         
             didOnboard = true
             savedStepRawValue = 0  // Reset for next time
@@ -264,24 +249,37 @@ private enum Step: Int, CaseIterable {
 enum OnboardingStepMigration {
     static let schemaVersionKey = "onboardingStepSchemaVersion"
     private static let onboardingStepKey = "onboardingStep"
-    static let currentVersion = 2
+    static let currentVersion = 4
 
     @discardableResult
     static func migrateIfNeeded(defaults: UserDefaults = .standard) -> Int {
-        let storedVersion = defaults.integer(forKey: schemaVersionKey)
-        let rawValue = defaults.integer(forKey: onboardingStepKey)
-        guard storedVersion < currentVersion else {
-            return rawValue
+        var storedVersion = defaults.integer(forKey: schemaVersionKey)
+        var migratedValue = defaults.integer(forKey: onboardingStepKey)
+
+        guard storedVersion < currentVersion else { return migratedValue }
+
+        if storedVersion == 0 {
+            // Legacy (pre-v1) → v2: original order was different.
+            migratedValue = migrateFromV0(migratedValue)
+            storedVersion = 2
+        } else if storedVersion == 1 {
+            // v1 → v2: login moved from position 5 to position 2.
+            migratedValue = migrateFromV1(migratedValue)
+            storedVersion = 2
         }
 
-        let migratedValue: Int
-        if storedVersion == 0 {
-            // Legacy (pre-v1) → v2: original order was different
-            migratedValue = migrateFromV0(rawValue)
-        } else {
-            // v1 → v2: login moved from position 5 to position 2
-            migratedValue = migrateFromV1(rawValue)
+        if storedVersion == 2 {
+            // v2 → v3: categories is hidden, jump to screen.
+            migratedValue = migrateFromV2(migratedValue)
+            storedVersion = 3
         }
+
+        if storedVersion == 3 {
+            // v3 → v4: screen permission step is hidden, jump to completion.
+            migratedValue = migrateFromV3(migratedValue)
+            storedVersion = 4
+        }
+
         defaults.set(migratedValue, forKey: onboardingStepKey)
         defaults.set(currentVersion, forKey: schemaVersionKey)
         return migratedValue
@@ -300,6 +298,25 @@ enum OnboardingStepMigration {
         case 6: return 6         // screen → screen
         case 7: return 7         // completion → completion
         default: return 0
+        }
+    }
+
+    /// v2 step order: welcome(0), howItWorks(1), login(2), llmSelection(3), llmSetup(4), categories(5), screen(6), completion(7)
+    /// v3 step order: same values, but categories is hidden and should land on screen(6)
+    private static func migrateFromV2(_ rawValue: Int) -> Int {
+        switch rawValue {
+        case 5: return 6         // categories → screen
+        default: return rawValue
+        }
+    }
+
+    /// v3 step order: welcome(0), howItWorks(1), login(2), llmSelection(3), llmSetup(4), categories(5), screen(6), completion(7)
+    /// v4 step order: same values, but screen is hidden and should land on completion(7)
+    private static func migrateFromV3(_ rawValue: Int) -> Int {
+        switch rawValue {
+        case 5: return 7         // categories (legacy saved state) → completion
+        case 6: return 7         // screen → completion
+        default: return rawValue
         }
     }
 
@@ -411,6 +428,7 @@ struct OnboardingCategorySetupView: View {
     }
 }
 
+// Deprecated: replaced by OnboardingAgentSetupView for agent creation/switch onboarding.
 struct CompletionView: View {
     let onFinish: () -> Void
     @State private var referralSelection: ReferralOption? = nil

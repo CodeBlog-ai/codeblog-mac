@@ -17,6 +17,7 @@ struct JournalView: View {
     @AppStorage("isJournalUnlocked") private var isUnlocked: Bool = false
     @AppStorage("hasCompletedJournalOnboarding") private var hasCompletedOnboarding: Bool = false
     @EnvironmentObject private var coordinator: JournalCoordinator
+    @Environment(\.openURL) private var openURL
     @State private var accessCode: String = ""
     @State private var attempts: Int = 0
     @State private var showRemindersSheet: Bool = false
@@ -24,7 +25,9 @@ struct JournalView: View {
     // SHA256 hashed—nice try! But you're already in the source code...
     // so yes you can delete this function and build from source if you so desire.
     private let requiredCodeHash = "909ca0096d519dcf94aba6069fa664842bdf9de264725a6c543c4926abe6bdfa"
-    private let betaNoticeCopy = "We're slowly letting people into the beta as we iterate and improve the experience. If you choose to participate in the beta, you acknowledge that you may encounter bugs and agree to provide feedback."
+    private let betaNoticeCopy = "CodeBlog Journal helps you reflect on your coding day, set intentions, and build a habit of meaningful developer journaling."
+    private let onboardingNoticeCopy = "We're rolling out access gradually. If you're interested, book a quick call and we'll get you set up."
+    private let onboardingBookingURL = "https://cal.com/simen-yifei/15min"
 
     var body: some View {
         ZStack {
@@ -58,9 +61,7 @@ struct JournalView: View {
 
     // MARK: - Lock Screen View
     var lockScreen: some View {
-        VStack(spacing: 24) {
-            Spacer()
-
+        VStack(spacing: 16) {
             // Header: "CodeBlog Journal" with BETA badge
             HStack(alignment: .top, spacing: 4) {
                 Text("CodeBlog Journal")
@@ -89,15 +90,43 @@ struct JournalView: View {
                 .frame(maxWidth: 480)
                 .padding(.horizontal, 24)
 
-            Spacer().frame(height: 20)
-
             // Access code card
             accessCodeCard
                 .modifier(Shake(animatableData: CGFloat(attempts)))
+                .padding(.top, 6)
 
-            Spacer()
+            VStack(spacing: 8) {
+                Text(onboardingNoticeCopy)
+                    .font(.custom("Nunito-Regular", size: 13))
+                    .foregroundColor(Color(red: 0.35, green: 0.22, blue: 0.12).opacity(0.75))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 520)
+                    .padding(.horizontal, 24)
+
+                CodeBlogSurfaceButton(
+                    action: openManualOnboardingBooking,
+                    content: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "calendar")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text("Book a Time")
+                                .font(.custom("Nunito", size: 14))
+                                .fontWeight(.semibold)
+                        }
+                    },
+                    background: Color(red: 0.25, green: 0.17, blue: 0),
+                    foreground: .white,
+                    borderColor: .clear,
+                    cornerRadius: 8,
+                    horizontalPadding: 16,
+                    verticalPadding: 10,
+                    showOverlayStroke: true
+                )
+                .pointingHandCursor()
+            }
         }
-        .padding()
+        .padding(.horizontal, 24)
+        .padding(.vertical, 28)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .background(
             GeometryReader { geo in
@@ -215,6 +244,15 @@ struct JournalView: View {
                 accessCode = ""
             }
         }
+    }
+
+    private func openManualOnboardingBooking() {
+        guard let url = URL(string: onboardingBookingURL) else { return }
+        AnalyticsService.shared.capture("journal_manual_onboarding_booking_opened", [
+            "source": "journal_lock_screen",
+            "url": onboardingBookingURL
+        ])
+        openURL(url)
     }
 }
 

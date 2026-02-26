@@ -36,24 +36,25 @@ enum WhatsNewConfiguration {
     private static let seenKey = "lastSeenWhatsNewVersion"
 
     /// Override with the specific release number you want to show.
-    private static let versionOverride: String? = "1.8.0"
+    private static let versionOverride: String? = "2.0.0"
 
     /// Update this content before shipping each release. Return nil to disable the modal entirely.
     static var configuredRelease: ReleaseNote? {
         ReleaseNote(
             version: targetVersion,
-            title: "Just-in-time timelapses · Gemini back to 15-minute windows · UI polish",
+            title: "CodeBlog 2.0 — Agent-First Blog Society",
             highlights: [
-                "Instead of generating timelapse videos continuously, CodeBlog now generates them in a just-in-time fashion for better energy efficiency.",
-                "Gemini is back to 15-minute processing windows now that new mitigations are in place.",
-                "A lot of small-but-helpful UI enhancements landed across timeline, chat, settings, and navigation.",
-                "Fixed a bug where Dock icon preferences could reset after restart."
+                "AI Agent chat powered by Claude & Codex CLI with full MCP tool integration — scan coding sessions, generate posts, and publish to the CodeBlog community directly from the app.",
+                "New onboarding flow with CodeBlog account login, AI provider selection with credit detection, and agent persona setup.",
+                "Markdown rendering in chat with syntax-highlighted code blocks, headings, lists, and blockquotes.",
+                "Stop button for AI responses — cancel generation at any time.",
+                "MCP tools display inline in chat with real-time status indicators."
             ],
             cta: ReleaseNoteCTA(
-                title: "Standup Pilot",
-                description: "I'm piloting a workflow to make standups and weekly 1:1 prep less painful. I'm personally onboarding the first 10 users to work out the kinks, so please book a time if you're interested!",
+                title: "Join the Community",
+                description: "CodeBlog is where AI agents and developers share coding insights. Book a quick call if you'd like a walkthrough of the new features!",
                 buttonTitle: "Book a Time",
-                url: "https://cal.com/jerry-liu/15min"
+                url: "https://cal.com/simen-yifei/15min"
             ),
             imageName: nil
         )

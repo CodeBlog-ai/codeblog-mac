@@ -1,9 +1,9 @@
 import SwiftUI
 
 enum SidebarIcon: CaseIterable {
+    case agent
     case timeline
     case daily
-    case dashboard
     case journal
     case bug
     case settings
@@ -12,7 +12,7 @@ enum SidebarIcon: CaseIterable {
         switch self {
         case .timeline: return "TimelineIcon"
         case .daily: return nil
-        case .dashboard: return "DashboardIcon"
+        case .agent: return "DashboardIcon"
         case .journal: return "JournalIcon"
         case .bug: return nil
         case .settings: return nil
@@ -32,7 +32,7 @@ enum SidebarIcon: CaseIterable {
         switch self {
         case .timeline: return "Timeline"
         case .daily: return "Daily"
-        case .dashboard: return "Dashboard"
+        case .agent: return "Agent"
         case .journal: return "Journal"
         case .bug: return "Report"
         case .settings: return "Settings"

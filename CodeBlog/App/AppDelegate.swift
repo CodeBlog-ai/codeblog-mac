@@ -96,7 +96,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         deepLinkRouter = AppDeepLinkRouter(delegate: self)
 
         // Check if we've passed the screen recording permission step
-        let onboardingStep = OnboardingStepMigration.migrateIfNeeded()
+        _ = OnboardingStepMigration.migrateIfNeeded()
         let didOnboard = UserDefaults.standard.bool(forKey: "didOnboard")
 
         // Seed recording flag low, then create recorder so the first
@@ -104,9 +104,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         AppState.shared.isRecording = false
         recorder = ScreenRecorder(autoStart: true)
 
-        // Only attempt to start recording if we're past the screen step or fully onboarded
-        // Steps: 0=welcome, 1=howItWorks, 2=llmSelection, 3=llmSetup, 4=categories, 5=screen, 6=completion
-        if didOnboard || onboardingStep > 5 {
+        // Only attempt to start recording after onboarding is fully completed.
+        if didOnboard {
             // Onboarding complete - enable persistence and restore user preference
             AppState.shared.enablePersistence()
 

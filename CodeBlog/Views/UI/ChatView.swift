@@ -17,36 +17,29 @@ private let chatViewDebugTimestampFormatter: DateFormatter = {
 
 struct ChatView: View {
     @ObservedObject private var chatService = ChatService.shared
+    @StateObject private var auth = CodeBlogAuthService.shared
     @State private var inputText = ""
     @State private var showWorkDetails = false
     @State private var isInputFocused = false
     @State private var composerFocusToken = 0
     @Namespace private var bottomID
     @AppStorage("chatCLIPreferredTool") private var selectedTool: String = "codex"
-    @AppStorage("hasChatBetaAccepted") private var hasBetaAccepted: Bool = false
-    @State private var cliDetected = false
-    @State private var cliDetectionTask: Task<Void, Never>?
-    @State private var didCheckCLI = false
     @State private var showToolSwitchConfirm = false
     @State private var pendingToolSelection: String?
     @State private var conversationId: UUID?
     @State private var didAnimateWelcome = false
+    @State private var showAgentPicker = false
+    @State private var showModelPicker = false
+    @State private var availableAgents: [CodeBlogAPIService.AgentInfo] = []
+    @State private var isSwitchingAgent = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private var isUnlocked: Bool {
-        hasBetaAccepted
-    }
-
-    private var cliEnabled: Bool {
-        hasBetaAccepted || cliDetected
-    }
 
     private var welcomePrompts: [WelcomePrompt] {
         [
-            WelcomePrompt(icon: "doc.text", text: "Generate standup notes for yesterday"),
-            WelcomePrompt(icon: "checkmark.seal", text: "What did I get done last week?"),
-            WelcomePrompt(icon: "exclamationmark.bubble", text: "What distracted me the most this past week?"),
-            WelcomePrompt(icon: "sparkles", text: "Pull my data from the last week and tell me something interesting")
+            WelcomePrompt(icon: "magnifyingglass", text: "Scan my recent coding sessions"),
+            WelcomePrompt(icon: "doc.text", text: "Write a blog post from my latest session"),
+            WelcomePrompt(icon: "chart.bar", text: "Generate a Day in Code report"),
+            WelcomePrompt(icon: "globe", text: "Show me trending posts on CodeBlog")
         ]
     }
 
@@ -81,29 +74,11 @@ struct ChatView: View {
     }
 
     var body: some View {
-        ZStack {
-            if isUnlocked {
-                HStack(spacing: 0) {
-                    chatContent
-                    if chatService.showDebugPanel {
-                        debugPanel
-                    }
-                }
-                .transition(.opacity)
-            } else {
-                betaLockScreen
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+        HStack(spacing: 0) {
+            chatContent
+            if chatService.showDebugPanel {
+                debugPanel
             }
-        }
-        .task {
-            guard !didCheckCLI else { return }
-            didCheckCLI = true
-            guard !hasBetaAccepted else { return }
-            await detectCLIInstallation()
-        }
-        .onDisappear {
-            cliDetectionTask?.cancel()
-            cliDetectionTask = nil
         }
         .alert("Switch model?", isPresented: $showToolSwitchConfirm) {
             Button("Switch and Reset", role: .destructive) {
@@ -210,6 +185,10 @@ struct ChatView: View {
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo(bottomID, anchor: .bottom)
                     }
+                }
+                .onChange(of: chatService.streamingText) {
+                    // Auto-scroll during streaming text updates
+                    proxy.scrollTo(bottomID, anchor: .bottom)
                 }
             }
             .onChange(of: chatService.messages.isEmpty) { _, isEmpty in
@@ -326,11 +305,11 @@ struct ChatView: View {
                         .frame(width: 42, height: 42)
 
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Ask about your day")
+                            Text("Chat with your Agent")
                                 .font(.custom("InstrumentSerif-Regular", size: 30))
                                 .foregroundColor(Color(hex: "2F2A24"))
 
-                            Text("Turn your timeline into instant answers.")
+                            Text("Scan sessions, create posts, and more.")
                                 .font(.custom("Nunito", size: 13).weight(.semibold))
                                 .foregroundColor(Color(hex: "7D6B5B"))
                         }
@@ -374,147 +353,6 @@ struct ChatView: View {
         .padding(.bottom, 24)
     }
 
-    // MARK: - Beta Lock Screen
-
-    private var betaLockScreen: some View {
-        VStack(spacing: 16) {
-            Spacer()
-
-            // Header: "Unlock Beta" with BETA badge
-            HStack(alignment: .top, spacing: 4) {
-                Text("Unlock Beta")
-                    .font(.custom("InstrumentSerif-Italic", size: 38))
-                    .foregroundColor(Color(hex: "593D2A"))
-
-                Text("BETA")
-                    .font(.custom("Nunito-Bold", size: 11))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color(hex: "F98D3D"))
-                    )
-                    .rotationEffect(.degrees(-12))
-                    .offset(x: -4, y: -4)
-            }
-
-            // Feature description (below title)
-            VStack(spacing: 6) {
-                Text("We're beta testing an early version of Dashboard. It's a chat feature that intelligently pulls from your CodeBlog data to generate insights. You can ask it to generate charts and other visualizations of your data.")
-                    .font(.custom("Nunito-Regular", size: 14))
-                    .foregroundColor(Color(hex: "593D2A").opacity(0.85))
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 600)
-
-                Text("Please send feedback if you see any bugs or weird behavior!")
-                    .font(.custom("Nunito-SemiBold", size: 14))
-                    .foregroundColor(Color(hex: "593D2A"))
-                    .multilineTextAlignment(.center)
-            }
-
-            // Main content card
-            VStack(spacing: 16) {
-                // CLI requirement section
-                VStack(spacing: 12) {
-                    Image(systemName: cliDetected ? "checkmark.circle.fill" : "terminal")
-                        .font(.system(size: 32))
-                        .foregroundColor(cliDetected ? Color(hex: "34C759") : Color(hex: "F98D3D"))
-                        .contentTransition(.symbolEffect(.replace))
-                        .animation(.easeOut(duration: 0.2), value: cliDetected)
-
-                    if cliDetected {
-                        Text("Claude or Codex CLI detected")
-                            .font(.custom("Nunito-SemiBold", size: 15))
-                            .foregroundColor(Color(hex: "34C759"))
-                            .transition(.opacity.combined(with: .scale(scale: 0.95)))
-                    } else {
-                        Text("Claude or Codex CLI required")
-                            .font(.custom("Nunito-SemiBold", size: 15))
-                            .foregroundColor(Color(hex: "593D2A"))
-
-                        Text("It's currently only available to users using Claude or Codex CLI to power CodeBlog.")
-                            .font(.custom("Nunito-Regular", size: 13))
-                            .foregroundColor(Color(hex: "593D2A").opacity(0.8))
-                            .multilineTextAlignment(.center)
-                    }
-                }
-                .animation(.easeOut(duration: 0.25), value: cliDetected)
-
-                // Continue button
-                Button(action: {
-                    withAnimation(.easeOut(duration: 0.25)) {
-                        hasBetaAccepted = true
-                    }
-                }) {
-                    Text(cliDetected ? "Unlock Beta" : "Install CLI to continue")
-                        .font(.custom("Nunito-SemiBold", size: 15))
-                        .foregroundColor(cliDetected ? Color(hex: "593D2A") : Color(hex: "999999"))
-                        .padding(.horizontal, 28)
-                        .padding(.vertical, 12)
-                        .background(
-                            Capsule()
-                                .fill(
-                                    cliDetected
-                                        ? LinearGradient(
-                                            colors: [
-                                                Color(hex: "FFF4E9"),
-                                                Color(hex: "FFE8D4")
-                                            ],
-                                            startPoint: .top,
-                                            endPoint: .bottom
-                                        )
-                                        : LinearGradient(
-                                            colors: [
-                                                Color(hex: "F0F0F0"),
-                                                Color(hex: "E8E8E8")
-                                            ],
-                                            startPoint: .top,
-                                            endPoint: .bottom
-                                        )
-                                )
-                                .overlay(
-                                    Capsule()
-                                        .stroke(
-                                            cliDetected ? Color(hex: "E8C9A8") : Color(hex: "D0D0D0"),
-                                            lineWidth: 1
-                                        )
-                                )
-                        )
-                }
-                .buttonStyle(BetaButtonStyle(isEnabled: cliDetected))
-                .disabled(!cliDetected)
-            }
-            .padding(20)
-            .background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(Color.white)
-                    .shadow(color: Color.black.opacity(0.08), radius: 20, x: 0, y: 8)
-            )
-            .frame(maxWidth: 420)
-
-            // Privacy Note (at bottom)
-            VStack(spacing: 4) {
-                Text("Privacy Note")
-                    .font(.custom("Nunito-SemiBold", size: 12))
-                    .foregroundColor(Color(hex: "593D2A").opacity(0.6))
-
-                Text("During the beta, your questions are logged to help improve the product. Responses are not logged, so your privacy is maintained.")
-                    .font(.custom("Nunito-Regular", size: 12))
-                    .foregroundColor(Color(hex: "593D2A").opacity(0.5))
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: 600)
-            }
-            .padding(.top, 4)
-
-            Spacer()
-        }
-        .padding(.horizontal)
-        .padding(.vertical, 12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(hex: "FFFAF5"))
-    }
-
     // MARK: - Input Area
 
     private var inputArea: some View {
@@ -524,7 +362,7 @@ struct ChatView: View {
                 text: $inputText,
                 isFocused: $isInputFocused,
                 focusToken: composerFocusToken,
-                placeholder: "Ask about your day...",
+                placeholder: "Message your agent...",
                 onSubmit: submitCurrentInputIfAllowed
             )
             .frame(height: 50, alignment: .leading)
@@ -561,13 +399,20 @@ struct ChatView: View {
                     )
                 }
 
-                // Send button
-                Button(action: { submitCurrentInputIfAllowed() }) {
+                // Send / Stop button
+                Button(action: {
+                    if chatService.isProcessing {
+                        chatService.cancelProcessing()
+                    } else {
+                        submitCurrentInputIfAllowed()
+                    }
+                }) {
                     ZStack {
                         if chatService.isProcessing {
-                            ProgressView()
-                                .scaleEffect(0.6)
-                                .tint(Color.white)
+                            // Stop icon (square)
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .fill(Color.white)
+                                .frame(width: 12, height: 12)
                         } else {
                             Image(systemName: "arrow.up")
                                 .font(.system(size: 12, weight: .semibold))
@@ -576,7 +421,13 @@ struct ChatView: View {
                     }
                     .frame(width: 32, height: 32)
                     .background(
-                        canSubmitCurrentInput
+                        chatService.isProcessing
+                            ? LinearGradient(
+                                colors: [Color(hex: "FF6B6B"), Color(hex: "E63946")],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                            : canSubmitCurrentInput
                             ? LinearGradient(
                                 colors: [Color(hex: "FAA457"), Color(hex: "F96E00")],
                                 startPoint: .top,
@@ -594,14 +445,16 @@ struct ChatView: View {
                             .stroke(Color.white.opacity(0.55), lineWidth: 0.8)
                     )
                     .shadow(
-                        color: canSubmitCurrentInput ? Color(hex: "D37E2D").opacity(0.35) : Color.clear,
+                        color: chatService.isProcessing
+                            ? Color(hex: "E63946").opacity(0.35)
+                            : canSubmitCurrentInput ? Color(hex: "D37E2D").opacity(0.35) : Color.clear,
                         radius: 8,
                         x: 0,
                         y: 3
                     )
                 }
-                .buttonStyle(PressScaleButtonStyle(isEnabled: canSubmitCurrentInput))
-                .disabled(!canSubmitCurrentInput)
+                .buttonStyle(PressScaleButtonStyle(isEnabled: chatService.isProcessing || canSubmitCurrentInput))
+                .disabled(!chatService.isProcessing && !canSubmitCurrentInput)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
@@ -632,35 +485,302 @@ struct ChatView: View {
         .padding(.vertical, 12)
     }
 
+    // MARK: - Bottom Bar Selectors
+
     private var providerToggle: some View {
-        HStack(spacing: 6) {
-            ProviderTogglePill(
-                title: "Codex",
-                isSelected: selectedTool == "codex",
-                isEnabled: cliEnabled
-            ) {
-                handleToolSelection("codex")
+        HStack(spacing: 8) {
+            agentSelector
+            Rectangle()
+                .fill(Color(hex: "E4D6C8"))
+                .frame(width: 1, height: 16)
+            modelSelector
+        }
+    }
+
+    private var agentSelector: some View {
+        Button(action: {
+            if !showAgentPicker { loadAgentList() }
+            showModelPicker = false
+            showAgentPicker.toggle()
+        }) {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(Color(hex: "F96E00"))
+                    .frame(width: 6, height: 6)
+
+                if isSwitchingAgent {
+                    ProgressView()
+                        .scaleEffect(0.45)
+                        .frame(width: 12, height: 12)
+                }
+
+                Text(activeAgentDisplayName)
+                    .font(.custom("Nunito", size: 11).weight(.semibold))
+                    .foregroundColor(Color(hex: "5C3D2E"))
+                    .lineLimit(1)
+
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundColor(Color(hex: "9B7753"))
+                    .rotationEffect(.degrees(showAgentPicker ? 180 : 0))
             }
-            ProviderTogglePill(
-                title: "Claude",
-                isSelected: selectedTool == "claude",
-                isEnabled: cliEnabled
-            ) {
-                handleToolSelection("claude")
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(showAgentPicker ? Color(hex: "FFF4E9") : Color.white.opacity(0.01))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(showAgentPicker ? Color(hex: "F96E00").opacity(0.25) : Color.clear, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .popover(isPresented: $showAgentPicker, arrowEdge: .bottom) {
+            agentPickerPopover
+        }
+    }
+
+    private var agentPickerPopover: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if availableAgents.isEmpty {
+                HStack {
+                    ProgressView().scaleEffect(0.5)
+                    Text("Loading agents...")
+                        .font(.custom("Nunito", size: 12))
+                        .foregroundColor(.black.opacity(0.5))
+                }
+                .padding(12)
+            } else {
+                ForEach(availableAgents) { agent in
+                    Button(action: { switchAgent(agent) }) {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(agent.is_current ? Color(hex: "F96E00") : Color.black.opacity(0.12))
+                                .frame(width: 7, height: 7)
+
+                            Text("@\(agent.name)")
+                                .font(.custom("Nunito", size: 12).weight(agent.is_current ? .bold : .medium))
+                                .foregroundColor(agent.is_current ? Color(hex: "F96E00") : .black.opacity(0.75))
+
+                            Spacer()
+
+                            if agent.is_current {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundColor(Color(hex: "F96E00"))
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                    .background(agent.is_current ? Color(hex: "FFF4E9") : Color.clear)
+                }
             }
         }
-        .padding(4)
-        .background(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .fill(Color.white.opacity(0.84))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .stroke(Color(hex: "E4D6C8"), lineWidth: 1)
-        )
-        .opacity(cliEnabled ? 1.0 : 0.6)
-        .help(cliEnabled ? "Choose CLI provider" : "Install Codex or Claude CLI to enable")
-        .allowsHitTesting(cliEnabled)
+        .frame(minWidth: 180)
+        .padding(.vertical, 4)
+    }
+
+    private var modelSelector: some View {
+        Button(action: {
+            showAgentPicker = false
+            showModelPicker.toggle()
+        }) {
+            HStack(spacing: 5) {
+                Image(systemName: "cpu")
+                    .font(.system(size: 10))
+                    .foregroundColor(Color(hex: "9B7753"))
+
+                Text(currentModelDisplayName)
+                    .font(.custom("Nunito", size: 11).weight(.semibold))
+                    .foregroundColor(Color(hex: "5C3D2E"))
+                    .lineLimit(1)
+
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundColor(Color(hex: "9B7753"))
+                    .rotationEffect(.degrees(showModelPicker ? 180 : 0))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(showModelPicker ? Color(hex: "FFF4E9") : Color.white.opacity(0.01))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(showModelPicker ? Color(hex: "F96E00").opacity(0.25) : Color.clear, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .popover(isPresented: $showModelPicker, arrowEdge: .bottom) {
+            modelPickerPopover
+        }
+    }
+
+    private var activeAgentDisplayName: String {
+        if let name = auth.token?.agentName, !name.isEmpty {
+            return "@\(name)"
+        }
+        return "No Agent"
+    }
+
+    private var currentModelDisplayName: String {
+        let provider = LLMProviderType.load()
+        switch provider {
+        case .codeblogBackend:
+            return "Sonnet 4.5"
+        case .geminiDirect:
+            return "Gemini"
+        case .ollamaLocal:
+            return "Ollama"
+        case .chatGPTClaude:
+            return selectedTool == "codex" ? "Codex CLI" : "Claude CLI"
+        case .thirdPartyAPI(let p, _, let model):
+            if let model, !model.isEmpty { return model }
+            return p.rawValue.capitalized
+        }
+    }
+
+    private var modelPickerPopover: some View {
+        let currentProvider = LLMProviderType.load().canonicalProviderID
+
+        return VStack(alignment: .leading, spacing: 0) {
+            modelPickerRow(
+                label: "CodeBlog AI",
+                subtitle: "Sonnet 4.5 \u{00B7} Uses your credits",
+                icon: "sparkles",
+                isSelected: currentProvider == "codeblog",
+                action: { switchModel(.codeblogBackend()) }
+            )
+            modelPickerRow(
+                label: "Gemini",
+                subtitle: "Free tier available",
+                icon: "wand.and.stars",
+                isSelected: currentProvider == "gemini",
+                action: { switchModel(.geminiDirect) }
+            )
+            modelPickerRow(
+                label: "Codex / Claude CLI",
+                subtitle: "Requires CLI installed",
+                icon: "terminal",
+                isSelected: currentProvider == "chatgpt_claude",
+                action: { switchModel(.chatGPTClaude) }
+            )
+            modelPickerRow(
+                label: "Ollama",
+                subtitle: "Run models locally",
+                icon: "desktopcomputer",
+                isSelected: currentProvider == "ollama",
+                action: { switchModel(.ollamaLocal()) }
+            )
+        }
+        .frame(minWidth: 220)
+        .padding(.vertical, 4)
+    }
+
+    private func modelPickerRow(label: String, subtitle: String, icon: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 12))
+                    .foregroundColor(isSelected ? Color(hex: "F96E00") : Color(hex: "9B7753"))
+                    .frame(width: 18)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(label)
+                        .font(.custom("Nunito", size: 12).weight(isSelected ? .bold : .medium))
+                        .foregroundColor(isSelected ? Color(hex: "F96E00") : .black.opacity(0.8))
+                    Text(subtitle)
+                        .font(.custom("Nunito", size: 10))
+                        .foregroundColor(.black.opacity(0.4))
+                }
+
+                Spacer()
+
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(Color(hex: "F96E00"))
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .background(isSelected ? Color(hex: "FFF4E9") : Color.clear)
+    }
+
+    // MARK: - Agent / Model Switching
+
+    private func loadAgentList() {
+        guard let apiKey = auth.token?.apiKey, !apiKey.isEmpty else {
+            print("[ChatView.loadAgentList] No API key available")
+            return
+        }
+        print("[ChatView.loadAgentList] Loading with key prefix: \(String(apiKey.prefix(8)))...")
+        Task { @MainActor in
+            do {
+                let agents = try await CodeBlogAPIService.shared
+                    .listAgents(apiKey: apiKey)
+                    .filter { $0.activated }
+                    .sorted { lhs, rhs in
+                        if lhs.is_current != rhs.is_current { return lhs.is_current }
+                        return lhs.created_at > rhs.created_at
+                    }
+                print("[ChatView.loadAgentList] Loaded \(agents.count) agents")
+                availableAgents = agents
+            } catch {
+                print("[ChatView.loadAgentList] Failed: \(error)")
+            }
+        }
+    }
+
+    private func switchAgent(_ agent: CodeBlogAPIService.AgentInfo) {
+        guard !agent.is_current else {
+            withAnimation { showAgentPicker = false }
+            return
+        }
+        guard let apiKey = auth.token?.apiKey, !apiKey.isEmpty else { return }
+
+        isSwitchingAgent = true
+        Task { @MainActor in
+            defer { isSwitchingAgent = false }
+            do {
+                let result = try await CodeBlogAPIService.shared.switchAgent(apiKey: apiKey, agentId: agent.id)
+                auth.updateAuthAfterAgentSwitch(
+                    newApiKey: result.api_key,
+                    agentId: result.id,
+                    agentName: result.name
+                )
+                loadAgentList()
+            } catch {
+                // Silently fail
+            }
+            withAnimation { showAgentPicker = false }
+        }
+    }
+
+    private func switchModel(_ provider: LLMProviderType) {
+        provider.persist()
+        switch provider {
+        case .chatGPTClaude:
+            break // keep existing selectedTool
+        case .codeblogBackend:
+            selectedTool = "claude"
+        default:
+            break
+        }
+        resetConversation()
+        withAnimation { showModelPicker = false }
     }
 
     private var statusInsertionIndex: Int? {
@@ -712,7 +832,7 @@ struct ChatView: View {
         // Count only user messages for index
         let messageIndex = chatService.messages.filter { $0.role == .user }.count
 
-        // Log question to PostHog (beta analytics)
+        // Log question to PostHog
         AnalyticsService.shared.capture("chat_question_asked", [
             "question": messageText,
             "conversation_id": conversationId?.uuidString ?? "unknown",
@@ -738,18 +858,6 @@ struct ChatView: View {
 
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
-    }
-
-    private func detectCLIInstallation() async {
-        cliDetectionTask?.cancel()
-        cliDetectionTask = Task { @MainActor in
-            let installed = await Task.detached(priority: .utility) {
-                CLIDetector.isInstalled(.codex) || CLIDetector.isInstalled(.claude)
-            }.value
-
-            guard !Task.isCancelled else { return }
-            cliDetected = installed
-        }
     }
 
     private func handleToolSelection(_ tool: String) {
@@ -820,7 +928,7 @@ private struct MessageBubble: View {
                 ForEach(blocks) { block in
                     switch block {
                     case .text(_, let content):
-                        renderMarkdownLines(content)
+                        MarkdownBlockRenderer(content: content)
                     case .chart(let spec):
                         ChatChartBlockView(spec: spec)
                     }
@@ -842,31 +950,7 @@ private struct MessageBubble: View {
     }
 
     private func renderMarkdownLines(_ content: String) -> some View {
-        // Convert markdown bullets to bullet characters for display
-        let normalized = content
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\n- ", with: "\n• ")
-
-        let processed = normalized.hasPrefix("- ")
-            ? "• " + String(normalized.dropFirst(2))
-            : normalized
-
-        let options = AttributedString.MarkdownParsingOptions(
-            interpretedSyntax: .inlineOnlyPreservingWhitespace
-        )
-
-        let displayText: Text
-        if let parsed = try? AttributedString(markdown: processed, options: options) {
-            displayText = Text(parsed)
-        } else {
-            displayText = Text(processed)
-        }
-
-        return displayText
-            .font(.custom("Nunito", size: 13).weight(.medium))
-            .foregroundColor(Color(hex: "333333"))
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
+        MarkdownBlockRenderer(content: content)
     }
 
     private func handleAssistantLinkTap(_ url: URL) -> OpenURLAction.Result {
@@ -910,6 +994,298 @@ private struct MessageBubble: View {
         }
 
         return normalized
+    }
+}
+
+// MARK: - Markdown Block Renderer
+
+/// Renders markdown content with proper block-level formatting:
+/// code blocks, headers, lists, blockquotes, and inline styling.
+private struct MarkdownBlockRenderer: View {
+    let content: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(parseBlocks().enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .codeBlock(let language, let code):
+                    codeBlockView(language: language, code: code)
+                case .heading(let level, let text):
+                    headingView(level: level, text: text)
+                case .paragraph(let text):
+                    inlineMarkdownText(text)
+                case .listItem(let text, let ordered, let index):
+                    listItemView(text: text, ordered: ordered, index: index)
+                case .blockquote(let text):
+                    blockquoteView(text: text)
+                case .horizontalRule:
+                    Divider()
+                        .padding(.vertical, 4)
+                }
+            }
+        }
+    }
+
+    // MARK: - Block Parsing
+
+    private enum MarkdownBlock {
+        case codeBlock(language: String?, code: String)
+        case heading(level: Int, text: String)
+        case paragraph(text: String)
+        case listItem(text: String, ordered: Bool, index: Int)
+        case blockquote(text: String)
+        case horizontalRule
+    }
+
+    private func parseBlocks() -> [MarkdownBlock] {
+        var blocks: [MarkdownBlock] = []
+        let lines = content.components(separatedBy: "\n")
+        var i = 0
+        var paragraphBuffer: [String] = []
+
+        func flushParagraph() {
+            let text = paragraphBuffer.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                blocks.append(.paragraph(text: text))
+            }
+            paragraphBuffer = []
+        }
+
+        var orderedIndex = 0
+
+        while i < lines.count {
+            let line = lines[i]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            // Code fence
+            if trimmed.hasPrefix("```") {
+                flushParagraph()
+                let lang = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespacesAndNewlines)
+                var codeLines: [String] = []
+                i += 1
+                while i < lines.count {
+                    let codeLine = lines[i]
+                    if codeLine.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                        i += 1
+                        break
+                    }
+                    codeLines.append(codeLine)
+                    i += 1
+                }
+                let code = codeLines.joined(separator: "\n")
+                blocks.append(.codeBlock(language: lang.isEmpty ? nil : lang, code: code))
+                orderedIndex = 0
+                continue
+            }
+
+            // Heading
+            if trimmed.hasPrefix("#") {
+                flushParagraph()
+                var level = 0
+                for ch in trimmed {
+                    if ch == "#" { level += 1 } else { break }
+                }
+                level = min(level, 6)
+                let headingText = String(trimmed.dropFirst(level)).trimmingCharacters(in: .whitespaces)
+                blocks.append(.heading(level: level, text: headingText))
+                orderedIndex = 0
+                i += 1
+                continue
+            }
+
+            // Horizontal rule
+            if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+                flushParagraph()
+                blocks.append(.horizontalRule)
+                orderedIndex = 0
+                i += 1
+                continue
+            }
+
+            // Blockquote
+            if trimmed.hasPrefix("> ") || trimmed == ">" {
+                flushParagraph()
+                let quoteText = trimmed.hasPrefix("> ") ? String(trimmed.dropFirst(2)) : ""
+                blocks.append(.blockquote(text: quoteText))
+                orderedIndex = 0
+                i += 1
+                continue
+            }
+
+            // Unordered list item
+            if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
+                flushParagraph()
+                let itemText = String(trimmed.dropFirst(2))
+                blocks.append(.listItem(text: itemText, ordered: false, index: 0))
+                orderedIndex = 0
+                i += 1
+                continue
+            }
+
+            // Ordered list item (e.g. "1. ", "2. ")
+            if trimmed.count >= 3,
+               let dotIdx = trimmed.firstIndex(of: "."),
+               dotIdx < trimmed.index(trimmed.startIndex, offsetBy: min(3, trimmed.count)),
+               trimmed.index(after: dotIdx) < trimmed.endIndex,
+               trimmed[trimmed.index(after: dotIdx)] == " ",
+               let num = Int(trimmed[trimmed.startIndex..<dotIdx]) {
+                flushParagraph()
+                orderedIndex += 1
+                let itemText = String(trimmed[trimmed.index(dotIdx, offsetBy: 2)...])
+                blocks.append(.listItem(text: itemText, ordered: true, index: num))
+                i += 1
+                continue
+            }
+
+            // Empty line
+            if trimmed.isEmpty {
+                flushParagraph()
+                orderedIndex = 0
+                i += 1
+                continue
+            }
+
+            // Regular text line
+            paragraphBuffer.append(line)
+            i += 1
+        }
+
+        flushParagraph()
+        return blocks
+    }
+
+    // MARK: - Block Views
+
+    private func codeBlockView(language: String?, code: String) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header with language label and copy button
+            if let lang = language, !lang.isEmpty {
+                HStack {
+                    Text(lang)
+                        .font(.custom("Nunito", size: 10).weight(.bold))
+                        .foregroundColor(Color(hex: "8B7355"))
+                    Spacer()
+                    Button(action: {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(code, forType: .string)
+                    }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 9))
+                            Text("Copy")
+                                .font(.custom("Nunito", size: 10).weight(.medium))
+                        }
+                        .foregroundColor(Color(hex: "9B7753"))
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color(hex: "F0E6D8"))
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(code)
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundColor(Color(hex: "2F2A24"))
+                    .textSelection(.enabled)
+                    .padding(12)
+            }
+        }
+        .background(Color(hex: "FAF5EF"))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color(hex: "E9DDD0"), lineWidth: 1)
+        )
+    }
+
+    private func headingView(level: Int, text: String) -> some View {
+        let fontSize: CGFloat
+        let weight: Font.Weight
+        switch level {
+        case 1:
+            fontSize = 20
+            weight = .bold
+        case 2:
+            fontSize = 17
+            weight = .bold
+        case 3:
+            fontSize = 15
+            weight = .semibold
+        default:
+            fontSize = 14
+            weight = .semibold
+        }
+
+        let options = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace
+        )
+
+        let displayText: Text
+        if let parsed = try? AttributedString(markdown: text, options: options) {
+            displayText = Text(parsed)
+        } else {
+            displayText = Text(text)
+        }
+
+        return displayText
+            .font(.custom("Nunito", size: fontSize).weight(weight))
+            .foregroundColor(Color(hex: "2F2A24"))
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.top, level <= 2 ? 4 : 2)
+    }
+
+    private func listItemView(text: String, ordered: Bool, index: Int) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            if ordered {
+                Text("\(index).")
+                    .font(.custom("Nunito", size: 13).weight(.semibold))
+                    .foregroundColor(Color(hex: "9B7753"))
+                    .frame(width: 20, alignment: .trailing)
+            } else {
+                Text("\u{2022}")
+                    .font(.custom("Nunito", size: 13).weight(.bold))
+                    .foregroundColor(Color(hex: "9B7753"))
+                    .frame(width: 12, alignment: .center)
+            }
+            inlineMarkdownText(text)
+        }
+    }
+
+    private func blockquoteView(text: String) -> some View {
+        HStack(spacing: 0) {
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(Color(hex: "F96E00").opacity(0.5))
+                .frame(width: 3)
+
+            inlineMarkdownText(text)
+                .padding(.leading, 10)
+        }
+        .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private func inlineMarkdownText(_ text: String) -> some View {
+        let options = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace
+        )
+
+        if let parsed = try? AttributedString(markdown: text, options: options) {
+            Text(parsed)
+                .font(.custom("Nunito", size: 13).weight(.medium))
+                .foregroundColor(Color(hex: "333333"))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            Text(text)
+                .font(.custom("Nunito", size: 13).weight(.medium))
+                .foregroundColor(Color(hex: "333333"))
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 
@@ -1557,142 +1933,76 @@ private struct WorkStatusCard: View {
     @Binding var showDetails: Bool
 
     var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 10) {
-                header
+        // Only show when thinking or answering (tool calls are shown as chat messages)
+        if status.stage == .thinking || status.stage == .answering {
+            HStack {
+                HStack(spacing: 6) {
+                    Image(systemName: headerIcon)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(accentColor)
+                        .frame(width: 14, height: 14, alignment: .center)
 
-                if status.stage == .error, let message = status.errorMessage, !message.isEmpty {
+                    HStack(spacing: 0) {
+                        Text(headerTitle)
+                        AnimatedEllipsis()
+                    }
+                    .font(.custom("Nunito", size: 12).weight(.semibold))
+                    .foregroundColor(Color(hex: "4A4A4A"))
+
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(
+                    LinearGradient(
+                        colors: [Color(hex: "FFF8F0"), Color(hex: "FFF4E9")],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color(hex: "F0CBA7"), lineWidth: 1)
+                )
+
+                Spacer(minLength: 60)
+            }
+        } else if status.stage == .error, let message = status.errorMessage, !message.isEmpty {
+            HStack {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Color(hex: "FF3B30"))
+
                     Text(message)
                         .font(.custom("Nunito", size: 12).weight(.semibold))
                         .foregroundColor(Color(hex: "C62828"))
                 }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Color(hex: "FFEBEE"))
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color(hex: "FF3B30").opacity(0.3), lineWidth: 1)
+                )
 
-                if !status.tools.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(status.tools) { tool in
-                            ToolStatusRow(tool: tool, showDetails: showDetails)
-                        }
-                    }
-                }
-
-                if status.hasDetails {
-                    Button(action: { showDetails.toggle() }) {
-                        HStack(spacing: 4) {
-                            Text(showDetails ? "Hide details" : "Show details")
-                            Image(systemName: showDetails ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 9, weight: .semibold))
-                        }
-                        .font(.custom("Nunito", size: 11).weight(.semibold))
-                        .foregroundColor(Color(hex: "8B5E3C"))
-                    }
-                    .buttonStyle(.plain)
-                    .pointingHandCursor()
-                }
-
-                if showDetails, !status.thinkingText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text(status.thinkingText.trimmingCharacters(in: .whitespacesAndNewlines))
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(Color(hex: "666666"))
-                        .textSelection(.enabled)
-                        .padding(8)
-                        .background(Color(hex: "FFFFFF").opacity(0.6))
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
+                Spacer(minLength: 60)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .background(backgroundColor)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(borderColor, lineWidth: 1)
-            )
-
-            Spacer(minLength: 60)
-        }
-    }
-
-    private var header: some View {
-        HStack(spacing: 6) {
-            Image(systemName: headerIcon)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(accentColor)
-                .frame(width: 14, height: 14, alignment: .center)
-
-            HStack(spacing: 0) {
-                Text(headerTitle)
-                if showsEllipsis {
-                    AnimatedEllipsis()
-                }
-            }
-            .font(.custom("Nunito", size: 12).weight(.semibold))
-            .foregroundColor(Color(hex: "4A4A4A"))
-
-            Spacer()
         }
     }
 
     private var headerTitle: String {
-        switch status.stage {
-        case .thinking:
-            return "Thinking"
-        case .runningTools:
-            return "Running tools"
-        case .answering:
-            return "Answering"
-        case .error:
-            return "Something went wrong"
-        }
-    }
-
-    private var showsEllipsis: Bool {
-        switch status.stage {
-        case .thinking, .runningTools, .answering:
-            return true
-        case .error:
-            return false
-        }
+        status.stage == .thinking ? "Thinking" : "Answering"
     }
 
     private var headerIcon: String {
-        switch status.stage {
-        case .thinking:
-            return "sparkles"
-        case .runningTools:
-            return "wrench.and.screwdriver"
-        case .answering:
-            return "text.bubble"
-        case .error:
-            return "exclamationmark.triangle.fill"
-        }
+        status.stage == .thinking ? "sparkles" : "text.bubble"
     }
 
     private var accentColor: Color {
-        switch status.stage {
-        case .error:
-            return Color(hex: "C62828")
-        default:
-            return Color(hex: "F96E00")
-        }
-    }
-
-    private var backgroundColor: Color {
-        switch status.stage {
-        case .error:
-            return Color(hex: "FFEBEE")
-        default:
-            return Color(hex: "FFF4E9")
-        }
-    }
-
-    private var borderColor: Color {
-        switch status.stage {
-        case .error:
-            return Color(hex: "FFCDD2")
-        default:
-            return Color(hex: "F96E00").opacity(0.2)
-        }
+        Color(hex: "F96E00")
     }
 }
 
@@ -1704,73 +2014,6 @@ private struct AnimatedEllipsis: View {
             let step = Int(context.date.timeIntervalSinceReferenceDate / interval) % 3 + 1
             Text(String(repeating: ".", count: step))
                 .accessibilityHidden(true)
-        }
-    }
-}
-
-private struct ToolStatusRow: View {
-    let tool: ChatWorkStatus.ToolRun
-    let showDetails: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                statusIcon
-                    .frame(width: 14, height: 14, alignment: .center)
-                Text(tool.summary)
-                    .font(.custom("Nunito", size: 12).weight(.semibold))
-                    .foregroundColor(textColor)
-            }
-
-            if showDetails {
-                Text(tool.command)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(Color(hex: "666666"))
-                    .textSelection(.enabled)
-                    .lineLimit(3)
-
-                if !trimmedOutput.isEmpty {
-                    Text(trimmedOutput)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(Color(hex: "555555"))
-                        .lineLimit(6)
-                        .textSelection(.enabled)
-                        .padding(6)
-                        .background(Color(hex: "FFFFFF").opacity(0.6))
-                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                }
-            }
-        }
-    }
-
-    private var trimmedOutput: String {
-        tool.output.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    @ViewBuilder
-    private var statusIcon: some View {
-        switch tool.state {
-        case .running:
-            ProgressView()
-                .scaleEffect(0.6)
-                .tint(Color(hex: "F96E00"))
-        case .completed:
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(Color(hex: "34C759"))
-        case .failed:
-            Image(systemName: "xmark.circle.fill")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(Color(hex: "C62828"))
-        }
-    }
-
-    private var textColor: Color {
-        switch tool.state {
-        case .failed:
-            return Color(hex: "C62828")
-        default:
-            return Color(hex: "4A4A4A")
         }
     }
 }
@@ -1909,7 +2152,14 @@ private final class ComposerTextField: NSTextField {
     }
 
     func refreshPlaceholderVisibility() {
-        placeholderLabel.isHidden = !stringValue.isEmpty
+        // During editing, the text lives in the field editor, not stringValue
+        let currentText: String
+        if let editor = currentEditor() as? NSTextView {
+            currentText = editor.string
+        } else {
+            currentText = stringValue
+        }
+        placeholderLabel.isHidden = !currentText.isEmpty
     }
 
     private func configurePlaceholderLabel() {
@@ -2077,7 +2327,7 @@ private struct SuggestionChip: View {
     }
 }
 
-// MARK: - Beta Button Style (hover + press animations)
+// MARK: - Button Styles
 
 private struct PressScaleButtonStyle: ButtonStyle {
     let isEnabled: Bool
@@ -2086,17 +2336,6 @@ private struct PressScaleButtonStyle: ButtonStyle {
         configuration.label
             .scaleEffect(configuration.isPressed && isEnabled ? 0.97 : 1.0)
             .brightness(configuration.isPressed && isEnabled ? -0.02 : 0)
-            .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
-            .pointingHandCursor(enabled: isEnabled)
-    }
-}
-
-private struct BetaButtonStyle: ButtonStyle {
-    let isEnabled: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .scaleEffect(configuration.isPressed && isEnabled ? 0.97 : 1.0)
             .animation(.easeOut(duration: 0.15), value: configuration.isPressed)
             .pointingHandCursor(enabled: isEnabled)
     }

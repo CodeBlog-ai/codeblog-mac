@@ -23,6 +23,8 @@ struct OnboardingLLMSelectionView: View {
     @State private var didUserSelectProvider: Bool = false
     @State private var creditBalanceUSD: String? = nil
     @State private var creditCheckOpacity: Double = 0
+    @State private var showCreditSuccess: Bool = false
+    @State private var isActivatingCodeBlogAI: Bool = false
     
     var body: some View {
         GeometryReader { geometry in
@@ -32,7 +34,7 @@ struct OnboardingLLMSelectionView: View {
             // Constants
             let edgePadding: CGFloat = 40
             let cardGap: CGFloat = 20
-            let headerHeight: CGFloat = creditBalanceUSD != nil ? 100 : 70
+            let headerHeight: CGFloat = creditBalanceUSD != nil ? 170 : 70
             let footerHeight: CGFloat = 70
 
             // Card width calc (no min width, cap at 480)
@@ -56,19 +58,9 @@ struct OnboardingLLMSelectionView: View {
                         .foregroundColor(.black.opacity(0.9))
                         .frame(maxWidth: .infinity)
 
-                    // Credit balance prompt
                     if let balance = creditBalanceUSD {
-                        HStack(spacing: 4) {
-                            Text("You have")
-                                .foregroundColor(.black.opacity(0.6))
-                            + Text(" $\(balance) ")
-                                .fontWeight(.semibold)
-                                .foregroundColor(Color(red: 0.2, green: 0.7, blue: 0.3))
-                            + Text("in AI credits — you can use CodeBlog's built-in AI at no extra cost.")
-                                .foregroundColor(.black.opacity(0.6))
-                        }
-                        .font(.custom("Nunito", size: 13))
-                        .multilineTextAlignment(.center)
+                        creditBalanceCard(balance: balance)
+                            .padding(.top, 8)
                         .opacity(creditCheckOpacity)
                     }
                 }
@@ -143,6 +135,96 @@ struct OnboardingLLMSelectionView: View {
         .onDisappear {
             cliDetectionTask?.cancel()
             cliDetectionTask = nil
+        }
+    }
+
+    private func creditBalanceCard(balance: String) -> some View {
+        HStack(spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(Color(red: 1, green: 0.42, blue: 0.02))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("$\(balance) in AI credits")
+                        .font(.custom("Nunito", size: 15))
+                        .fontWeight(.bold)
+                        .foregroundColor(.black.opacity(0.85))
+
+                    Text("Use CodeBlog's built-in AI at no extra cost")
+                        .font(.custom("Nunito", size: 12))
+                        .fontWeight(.semibold)
+                        .foregroundColor(.black.opacity(0.6))
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            CodeBlogSurfaceButton(
+                action: useCodeBlogAIFromCredits,
+                content: {
+                    HStack(spacing: 6) {
+                        if isActivatingCodeBlogAI {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .scaleEffect(0.7)
+                                .tint(.white)
+                        } else if showCreditSuccess {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 13, weight: .bold))
+                        }
+
+                        Text(showCreditSuccess ? "Configured!" : "Use CodeBlog AI")
+                            .font(.custom("Nunito", size: 13))
+                            .fontWeight(.bold)
+                    }
+                },
+                background: showCreditSuccess
+                    ? Color(red: 0.2, green: 0.7, blue: 0.3)
+                    : Color(red: 1, green: 0.42, blue: 0.02),
+                foreground: .white,
+                borderColor: .clear,
+                cornerRadius: 8,
+                horizontalPadding: 18,
+                verticalPadding: 10,
+                minWidth: 148,
+                showOverlayStroke: true
+            )
+            .disabled(showCreditSuccess || isActivatingCodeBlogAI)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(Color(red: 1, green: 0.97, blue: 0.94))
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(Color(red: 1, green: 0.42, blue: 0.02))
+                .frame(width: 4)
+        }
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color(red: 1, green: 0.42, blue: 0.02).opacity(0.2), lineWidth: 1)
+        )
+        .cornerRadius(12)
+        .frame(maxWidth: 760)
+    }
+
+    private func useCodeBlogAIFromCredits() {
+        guard !showCreditSuccess, !isActivatingCodeBlogAI else { return }
+
+        isActivatingCodeBlogAI = true
+        CodeBlogAuthService.shared.storeApiKeyInKeychain()
+        LLMProviderType.codeblogBackend().persist()
+
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.6)) {
+            didUserSelectProvider = true
+            selectedProvider = "codeblog"
+            showCreditSuccess = true
+            isActivatingCodeBlogAI = false
+        }
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1))
+            onNext("codeblog")
         }
     }
     
@@ -355,23 +437,12 @@ struct OnboardingLLMSelectionView: View {
 
         Task {
             do {
-                var request = URLRequest(url: URL(string: "https://codeblog.ai/api/v1/ai-credit/balance")!)
-                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-                request.timeoutInterval = 5
-
-                let (data, response) = try await URLSession.shared.data(for: request)
-                guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else { return }
-
-                struct CreditBalanceResponse: Decodable {
-                    let balance_cents: Int
-                    let balance_usd: String
-                }
-                let balance = try JSONDecoder().decode(CreditBalanceResponse.self, from: data)
+                let balance = try await CodeBlogAPIService.shared.checkCreditBalance(apiKey: apiKey)
                 guard balance.balance_cents > 0 else { return }
 
                 await MainActor.run {
                     creditBalanceUSD = balance.balance_usd
-                    withAnimation(.easeOut(duration: 0.5).delay(0.5)) {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.6).delay(0.5)) {
                         creditCheckOpacity = 1
                     }
                 }

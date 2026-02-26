@@ -2,7 +2,7 @@
 //  DaySummaryView.swift
 //  CodeBlog
 //
-//  "Your day so far" dashboard showing category breakdown and focus stats
+//  "Your day so far" side panel showing category breakdown and focus stats
 //
 
 import SwiftUI
@@ -405,7 +405,7 @@ struct DaySummaryView: View {
                     .font(.custom("InstrumentSerif-Regular", size: 22))
                     .foregroundColor(Design.gateTitleColor)
 
-                Text("Your day so far is a preview of what's to come in Dashboard. This feature is still in beta and may change rapidly.")
+                Text("Your day so far is a preview of what's to come in Agent. This feature is still in beta and may change rapidly.")
                     .font(.custom("Nunito", size: 11))
                     .foregroundColor(Design.gateSubtitleColor)
                     .multilineTextAlignment(.center)

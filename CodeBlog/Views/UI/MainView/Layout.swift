@@ -37,10 +37,26 @@ extension MainView {
                 )
             }
             .onAppear {
-                // screen viewed and initial timeline view
-                AnalyticsService.shared.screen("timeline")
-                AnalyticsService.shared.withSampling(probability: 0.01) {
-                    AnalyticsService.shared.capture("timeline_viewed", ["date_bucket": dayString(selectedDate)])
+                if isFirstLaunchAfterOnboarding {
+                    selectedIcon = .agent
+                    isFirstLaunchAfterOnboarding = false
+                }
+
+                let initialTabName: String
+                switch selectedIcon {
+                case .agent: initialTabName = "agent"
+                case .daily: initialTabName = "daily"
+                case .journal: initialTabName = "journal"
+                case .bug: initialTabName = "bug_report"
+                case .settings: initialTabName = "settings"
+                case .timeline: initialTabName = "timeline"
+                }
+
+                AnalyticsService.shared.screen(initialTabName)
+                if initialTabName == "timeline" {
+                    AnalyticsService.shared.withSampling(probability: 0.01) {
+                        AnalyticsService.shared.capture("timeline_viewed", ["date_bucket": dayString(selectedDate)])
+                    }
                 }
                 // Orchestrated entrance animations following Emil Kowalski principles
                 // Fast, under 300ms, natural spring motion
@@ -98,7 +114,7 @@ extension MainView {
                 switch newIcon {
                 case .timeline: tabName = "timeline"
                 case .daily: tabName = "daily"
-                case .dashboard: tabName = "dashboard"
+                case .agent: tabName = "agent"
                 case .journal: tabName = "journal"
                 case .bug: tabName = "bug_report"
                 case .settings: tabName = "settings"
@@ -276,14 +292,13 @@ extension MainView {
             case .settings:
                 SettingsView()
                     .padding(15)
-            case .dashboard:
-                DashboardView()
+            case .agent:
+                AgentHomeView()
                     .padding(15)
             case .daily:
                 DailyView(selectedDate: $selectedDate)
             case .journal:
                 JournalView()
-                    .padding(15)
             case .bug:
                 BugReportView()
                     .padding(15)

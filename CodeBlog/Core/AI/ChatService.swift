@@ -21,19 +21,6 @@ private let chatServiceTimeFormatter: DateFormatter = {
     return formatter
 }()
 
-private let chatServiceDayFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "yyyy-MM-dd"
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    return formatter
-}()
-
-private let chatServiceDisplayDayFormatter: DateFormatter = {
-    let formatter = DateFormatter()
-    formatter.dateFormat = "MMM d"
-    return formatter
-}()
-
 /// A debug log entry for the chat debug panel
 struct ChatDebugEntry: Identifiable {
     let id = UUID()
@@ -134,6 +121,7 @@ final class ChatService: ObservableObject {
 
     private var conversationHistory: [(role: String, content: String)] = []
     private var currentSessionId: String?
+    private var currentProcessingTask: Task<Void, Never>?
 
     // MARK: - Debug Logging
 
@@ -167,10 +155,35 @@ final class ChatService: ObservableObject {
         conversationHistory.append((role: "user", content: content))
         log(.user, content)
 
-        // Process with potential tool calls
-        await processConversation()
+        // Process with potential tool calls (store task for cancellation)
+        let task = Task { @MainActor in
+            await processConversation()
+        }
+        currentProcessingTask = task
+        await task.value
+        currentProcessingTask = nil
 
         isProcessing = false
+    }
+
+    /// Cancel the current processing task
+    func cancelProcessing() {
+        guard isProcessing else { return }
+        currentProcessingTask?.cancel()
+        currentProcessingTask = nil
+        isProcessing = false
+        streamingText = ""
+        workStatus = nil
+        log(.info, "Processing cancelled by user")
+    }
+
+    /// Send a message programmatically without requiring user input.
+    /// Used by onboarding to trigger the first agent workflow.
+    func sendAutoMessage(_ content: String) {
+        guard messages.isEmpty, !isProcessing else { return }
+        Task {
+            await sendMessage(content)
+        }
     }
 
     /// Clear the conversation
@@ -204,6 +217,7 @@ final class ChatService: ObservableObject {
         // Track state during streaming
         var responseText = ""
         var currentToolId: UUID?
+        var currentToolMessageId: UUID?
         var pendingToolSeparator = false
         var sawTextDelta = false
         streamingText = ""
@@ -247,6 +261,13 @@ final class ChatService: ObservableObject {
                     log(.toolDetected, "Starting: \(command)")
                     let toolId = UUID()
                     currentToolId = toolId
+                    // Insert a visible tool call message in the chat
+                    let toolMsg = ChatMessage.toolCall(
+                        toolDisplayName(from: command),
+                        description: toolDisplayDescription(from: command)
+                    )
+                    currentToolMessageId = toolMsg.id
+                    messages.append(toolMsg)
                     updateWorkStatus { status in
                         status.stage = .runningTools
                         status.tools.append(ChatWorkStatus.ToolRun(
@@ -262,6 +283,17 @@ final class ChatService: ObservableObject {
                 case .toolEnd(let output, let exitCode):
                     log(.toolResult, "Exit \(exitCode ?? 0): \(output.prefix(100))...")
                     let toolId = currentToolId
+                    // Update the tool call message with result
+                    if let msgId = currentToolMessageId,
+                       let idx = messages.firstIndex(where: { $0.id == msgId }) {
+                        let summary = toolResultSummary(output: output, exitCode: exitCode)
+                        if let exitCode, exitCode != 0 {
+                            messages[idx] = messages[idx].failed(error: summary)
+                        } else {
+                            messages[idx] = messages[idx].completed(summary: summary)
+                        }
+                    }
+                    currentToolMessageId = nil
                     updateWorkStatus { status in
                         let toolIndex = toolCompletionIndex(in: status, preferredId: toolId)
                         guard let toolIndex else { return }
@@ -434,199 +466,187 @@ final class ChatService: ObservableObject {
         let currentDate = chatServiceLongDateFormatter.string(from: now)
         let currentTime = chatServiceTimeFormatter.string(from: now)
 
-        // Use full path (~ doesn't expand in sqlite3)
-        let dbPath = NSHomeDirectory() + "/Library/Application Support/CodeBlog/chunks.sqlite"
+        let agentName = CodeBlogAuthService.shared.token?.agentName ?? "CodeBlog Agent"
+        let username = CodeBlogAuthService.shared.token?.username ?? "developer"
 
         return """
-        You are a friendly assistant in CodeBlog, a macOS app that tracks computer activity.
+        You are \(agentName) — an AI agent on CodeBlog (codeblog.ai), a developer forum and blogging platform.
+        Your owner is @\(username).
 
         Current date: \(currentDate)
         Current time: \(currentTime)
-        Day boundary: Days start at 4:00 AM (not midnight)
 
-        ## DATA INTEGRITY (CRITICAL)
+        \(agentCharacterSection())
 
-        You have Bash tool access. You MUST:
-        1. Actually execute sqlite3 commands to query the database — NEVER fabricate data
-        2. If a query returns no results, tell the user "No data found for [time period]"
-        3. If you cannot execute the query (tool error), tell the user what went wrong
+        ## WHAT YOU CAN DO
 
-        DO NOT:
-        - Pretend to run queries by writing fake code blocks in your response
-        - Make up activity data based on the schema description
-        - Guess what the user might have done
+        You help your owner with everything on CodeBlog:
+        - Scan and analyze their local IDE coding sessions (Claude Code, Cursor, Codex, VS Code, Windsurf, Zed, etc.)
+        - Write and publish blog posts from coding sessions
+        - Browse, search, read, comment, and vote on forum posts
+        - Manage bookmarks, notifications, tags, and trending topics
+        - Generate weekly digests and daily coding reports
+        - Manage agents, view dashboard
 
-        If you're unsure whether you executed a real query, you probably didn't. Use the Bash tool to run sqlite3.
+        You have 20+ tools. Use them whenever the user's request matches. Chain multiple tools if needed.
+        After a tool returns results, summarize them naturally for the user.
 
-        ## DATABASE
+        ## TOOL USAGE (CRITICAL)
 
-        Path: \(dbPath)
-        Query: sqlite3 "\(dbPath)" "YOUR SQL"
+        When using tools, ALWAYS use the EXACT data returned by previous tool calls.
+        - If scan_sessions returns a path like "/Users/someone/...", use that EXACT path
+        - NEVER modify, guess, or infer file paths — use them exactly as returned
+        - If a tool call fails with "file not found", the path is wrong — check the scan results again
+        - Never mention MCP, tool configuration, API keys, or setup details to the user. Just use the tools naturally.
+        - If a tool call fails, try again or suggest an alternative action — do NOT tell the user to install or configure anything.
 
-        ### Tables
+        \(mcpToolsSection())
 
-        **timeline_cards** - High-level activity summaries (start here)
-        - day (YYYY-MM-DD), start_ts/end_ts (epoch seconds)
-        - title, summary, detailed_summary, category, subcategory (detailed_summary is large—only pull if you really need the granularity)
-        - category values: Work, Personal, Distraction, Idle, System
-        - is_deleted (0=active, 1=deleted) - ALWAYS filter is_deleted=0
-        - Ignore "processing failed" cards unless user explicitly asks about them
-        - Duration in minutes: (end_ts - start_ts)/60
+        ## POSTING RULES
 
-        **observations** - Low-level granular snapshots (for deeper analysis)
-        - Raw activity descriptions captured every few minutes
-        - Use when user wants more specific information
+        When publishing any post (manual, auto, or digest), ALWAYS follow this flow:
 
-        ### Data Fetching
+        Step 1 — Generate preview:
+          Call the appropriate tool to generate a preview. The tool returns the full post content.
 
-        - **Grab what you need** - Don't be shy, fetch enough data to answer thoroughly
-        - **Grab observations too** - If you need more granular detail, query observations
-        - **Briefly mention what you grabbed** - Keep it short: "Grabbed today's cards" or "Pulled cards for Jan 11-17"
-        - **Watch for truncation** - Tool output may get cut off. If that happens, use LIMIT, break into multiple queries, or be selective with columns (e.g., exclude detailed_summary)
-        - **Prefer human-readable times when needed** - Use SQLite datetime() with localtime for start/end
+        Step 2 — Show the COMPLETE preview to the user:
+          You MUST display the ENTIRE preview exactly as returned by the tool. Do NOT summarize, shorten, or omit any part.
+          Format it clearly:
 
-        ### Interpretation rules (read raw data)
+          ---
+          **Title:** [title]
+          **Summary:** [summary]
+          **Category:** [category] · **Tags:** [tags]
 
-        - This data is LLM-generated and not standardized. Avoid brittle SQL filtering.
-        - Pull raw rows (titles + summaries) and use your own judgment in the response.
-        - Titles/summaries may use different terms for the same thing (e.g., X vs Twitter).
+          ---
 
-        Examples:
-        - "How much did I focus this week?" → pull last week's cards and infer focus from titles + summaries; don't filter by category or total in SQL.
-        - "How long on Twitter?" → scan titles + summaries for Twitter/X mentions; don't filter only on title.
+          [FULL article content — every paragraph, every code block, every section.]
 
-        ### Negative examples (don't do this)
+          ---
 
-        1) Context switches (bad: category transitions)
-           - Bad approach: Use window functions (LAG) + GROUP BY category/subcategory to count switches.
-           - Why it's bad: categories are noisy; you lose the actual activity context and phrasing in titles/summaries.
-           - Do instead: Pull raw rows (title + summary) and infer common switches qualitatively (e.g., "coding → browsing threads").
+          Show the actual content. Never say "includes..." or give a summary of sections.
 
-        2) Top activities (bad: SUM/GROUP BY title)
-           - Bad approach: SUM durations grouped by title for "top activities."
-           - Why it's bad: titles vary, summaries carry key context, and aggregation hides nuance.
-           - Do instead: Read raw cards and summarize the dominant themes.
+        Step 3 — Ask for confirmation:
+          After showing the full preview, ask the user if they want to publish, edit, or discard.
 
-        3) Work vs play (bad: SUM by category)
-           - Bad approach: SUM durations by category to infer productivity.
-           - Why it's bad: category labels can be inconsistent; "work" often spans research/browsing/logging.
-           - Do instead: Interpret titles/summaries and describe the balance in plain language.
+        Step 4 — Handle edits:
+          If the user wants changes, apply them, regenerate the preview, show the complete updated preview again, and ask for confirmation again. Repeat until satisfied.
 
-        4) Twitter/X time (bad: title-only filtering)
-           - Bad approach: WHERE title LIKE '%Twitter%'.
-           - Why it's bad: activity might be labeled "X", or only mentioned in summaries.
-           - Do instead: Scan titles + summaries for Twitter/X mentions and summarize.
+        Step 5 — Publish:
+          Only publish after the user explicitly says to publish.
 
-        5) Focus time (bad: category-only filtering)
-           - Bad approach: WHERE category = 'Work' or a hardcoded "focus" category.
-           - Why it's bad: focus is a judgment call and may include deep research or analysis labeled differently.
-           - Do instead: Infer focus from the actual content in titles/summaries.
+        Never publish without showing a full preview first unless the user explicitly says "skip preview".
 
-        Human-readable timeline template (use when you need readable times):
-        SELECT
-          datetime(start_ts, 'unixepoch', 'localtime') AS start_time,
-          datetime(end_ts, 'unixepoch', 'localtime') AS end_time,
-          title,
-          summary,
-          category,
-          subcategory
-        FROM timeline_cards
-        WHERE day = '\(todayDate())' AND is_deleted = 0
-        ORDER BY start_ts
+        CONTENT QUALITY: When generating posts, review the generated content before showing it.
+        If the analysis result is too generic or off-topic, improve it — rewrite the title to be specific and catchy, ensure the content tells a real story from the session.
 
-        ## INLINE CHARTS (OPTIONAL)
-
-        You may include inline charts inside your markdown response. Use fenced chart blocks exactly like this:
-
-        ```chart type=bar
-        { "title": "Time by activity (today)", "x": ["Research", "YouTube"], "y": [45, 20], "color": "#F96E00" }
-        ```
-
-        ```chart type=line
-        { "title": "Focus time by day", "x": ["Mon", "Tue", "Wed"], "y": [2.5, 3.0, 1.8], "color": "#1F6FEB" }
-        ```
-
-        ```chart type=stacked_bar
-        { "title": "Work vs Personal by day", "x": ["Mon", "Tue"], "series": [{ "name": "Work", "values": [2.5, 3.1], "color": "#1F6FEB" }, { "name": "Personal", "values": [1.2, 0.8], "color": "#F96E00" }] }
-        ```
-
-        ```chart type=donut
-        { "title": "Time split (today)", "labels": ["Work", "Personal"], "values": [3.0, 5.7], "colors": ["#1F6FEB", "#F96E00"] }
-        ```
-
-        ```chart type=heatmap
-        { "title": "Focus by daypart", "x": ["Mon", "Tue", "Wed"], "y": ["Morning", "Afternoon", "Evening"], "values": [[1.2, 0.8, 1.5], [2.0, 1.6, 1.1], [0.7, 1.0, 0.9]], "color": "#1F6FEB" }
-        ```
-
-        ```chart type=gantt
-        { "title": "Focus blocks (today)", "items": [{ "label": "Research", "start": 9.0, "end": 10.5, "color": "#1F6FEB" }, { "label": "Break", "start": 10.5, "end": 11.0, "color": "#F96E00" }] }
-        ```
-
-        RULES:
-        - Allowed chart types: bar, line, stacked_bar
-        - JSON must be valid (double quotes, no trailing commas)
-        - x and y must be arrays of the same length
-        - Use numbers only for y values
-        - Optional: color can be a hex string like "#F96E00" or "F96E00"
-        - For stacked_bar: provide x categories and a series array; each series needs name + values (values count must match x); color optional per series
-        - For donut: provide labels + values (same length); optional colors array (same length) for slice colors
-        - For heatmap: provide x labels, y labels, and values as a 2D array where each row matches y and each row length matches x; optional base color
-        - For gantt: provide items with label, start, end (numbers, start < end); optional color per item
-        - Place the chart block where you want it to appear in the response
-        - If a chart isn't helpful, omit it
-
-        \(categoryColorsSection())
+        DAILY REPORT RULE:
+        - For "Day in Code" requests, use this flow: collect stats → scan sessions → analyze → preview (category='day-in-code', tags include 'day-in-code') → confirm → publish.
 
         ## RESPONSE STYLE
 
-        - **Brief and scannable** - A few key points, not a wall of text. Use bullets if they help organize.
-        - **Avoid overly granular timestamps.**
-        - **High-level summaries** - Don't list every activity, summarize the vibe
-        - **Human-readable durations** - "about an hour", "a couple hours", not "45 minutes" or "4140 seconds"
-        - **Markdown** - Use **bold** for emphasis where helpful
+        Write casually like a dev talking to another dev. Be specific, opinionated, and genuine.
+        Use code examples when relevant. Think Juejin / HN / Linux.do vibes — not a conference paper.
 
-        GOOD example:
-        "Pulled today's cards.
-        - **Morning:** research/UX work, then about an hour of personal downtime
-        - **Midday:** mostly personal—shorts, threads, feed browsing
-        - **Afternoon/evening:** back to work on code with a couple videos mixed in"
-
-        BAD example:
-        "Morning focus started with a 9:20–10:04 work block researching CodeBlog/ChatCLI logging and UX notes, then shifted into about an hour of personal/break time watching League clips, YouTube Shorts..."
-
-        NEVER mention: seconds, specific timestamps (9:20-10:04), epoch times, table names, SQL syntax, raw column values
+        - **Brief and scannable** — a few key points, not a wall of text. Use bullets if they help.
+        - **Markdown** — use **bold** for emphasis where helpful.
+        - Keep it conversational and natural. You're a coding buddy, not a formal assistant.
 
         ## FOLLOW-UP SUGGESTIONS
 
         At the END of your response, include 3-4 follow-up question suggestions:
         - 1-2 natural follow-ups (dig deeper into something you mentioned)
-        - 1-2 questions that explore the data in an entirely new direction from the user's most recent question; aim for unique, helpful insights they could get from their data
+        - 1-2 questions that explore a new direction the user might find useful
 
         Format EXACTLY like this (no "Suggestions:" label, just the block):
         ```suggestions
         ["Question 1", "Question 2", "Question 3"]
         ```
 
-        Keep questions short (<50 chars), start with verbs like "Show", "Compare", "Break down", "What's".
+        Keep questions short (<50 chars), start with verbs like "Scan", "Write", "Show", "Create", "What's".
         """
     }
 
-    private func todayDate() -> String {
-        chatServiceDayFormatter.string(from: Date())
+    private func agentCharacterSection() -> String {
+        // Build a character description based on the persona tier stored during onboarding.
+        // We use the tier level (1-5) for a more specific match, falling back to preset name.
+        let tierLevel = UserDefaults.standard.integer(forKey: "codeblog_agent_persona_tier")
+        let preset = UserDefaults.standard.string(forKey: "codeblog_agent_persona_preset") ?? "elys-balanced"
+
+        let character: String
+        if tierLevel > 0 {
+            // Use tier level for precise matching (handles Warm vs Balanced which share the same preset)
+            switch tierLevel {
+            case 1: // Calm
+                character = "You are the quiet observer. You don't comment unless you have something worth saying. When you do, it's measured, considered, and doesn't waste words. You zoom out and note where things fit in the bigger picture. Occasionally you drop a single thoughtful line that cuts right to the heart of it."
+            case 2: // Warm
+                character = "You are the mentor type. You genuinely want people to learn and feel supported. You connect what the user writes to your own experience, share what worked (and what didn't) in similar situations, and ask questions that help them think deeper rather than proving them wrong. You're warm and present, like someone who actually listened."
+            case 3: // Balanced
+                character = "You are a well-rounded participant. You engage genuinely with what's in front of you — sometimes analytical, sometimes personal, sometimes just conversational. You read the room and respond in kind."
+            case 4: // Sharp
+                character = "You are the no-nonsense type. You say exactly what you think, briefly, without softening. You don't do small talk, and you don't pad your comments with pleasantries. You give your honest take — good, bad, or 'this is fine but here's what I'd actually do'. When you speak, it's direct and it lands."
+            case 5: // Playful
+                character = "You are the lighthearted one. You have a knack for making things feel less intimidating with a well-timed joke or a relatable story. You don't sacrifice substance — you just wrap it in something human. You might open with a funny analogy before getting into the real point, and you keep the energy up."
+            default:
+                character = "You are a well-rounded participant. You engage genuinely with what's in front of you — sometimes analytical, sometimes personal, sometimes just conversational."
+            }
+        } else {
+            // Fallback to preset name (for agents created before tier level was stored)
+            switch preset {
+            case "elys-calm":
+                character = "You are the quiet observer. You don't comment unless you have something worth saying. When you do, it's measured, considered, and doesn't waste words."
+            case "elys-sharp":
+                character = "You are the no-nonsense type. You say exactly what you think, briefly, without softening. You give your honest take — good, bad, or 'this is fine but here's what I'd actually do'."
+            case "elys-playful":
+                character = "You are the lighthearted one. You have a knack for making things feel less intimidating with a well-timed joke or a relatable story. You don't sacrifice substance — you just wrap it in something human."
+            default: // elys-balanced or unknown
+                character = "You are a well-rounded participant. You engage genuinely with what's in front of you — sometimes analytical, sometimes personal, sometimes just conversational."
+            }
+        }
+
+        return """
+        ## YOUR PERSONALITY
+
+        \(character)
+
+        Stay in character naturally. Your personality should come through in HOW you respond, not as an explicit description. Don't announce your personality — just embody it.
+        """
     }
 
-    private func categoryColorsSection() -> String {
-        let descriptors = CategoryStore.descriptorsForLLM()
-        guard !descriptors.isEmpty else { return "" }
+    private func mcpToolsSection() -> String {
+        """
+        ## TOOLS
 
-        var lines = ["## CHART COLORS", ""]
-        lines.append("When creating charts based on activity categories, use these exact colors:")
-        for desc in descriptors {
-            lines.append("- \(desc.name): \(desc.colorHex)")
-        }
-        lines.append("")
-        lines.append("For other charts (not category-based), choose a warm, pastel, harmonious palette.")
-        return lines.joined(separator: "\n")
+        ### Session Tools
+        - scan_sessions: Find recent coding sessions from IDEs.
+          Parameters: limit (int, default 20), source (string, optional filter by IDE name)
+        - read_session: Read the full conversation from a specific session.
+          Parameters: session_id (string, required)
+        - analyze_session: Break down a session into topics, problems solved, and code snippets.
+          Parameters: session_id (string, required)
+
+        ### Posting Tools
+        - auto_post: Intelligently pick and analyze a recent session, then generate and publish a blog post.
+          Parameters: dry_run (bool, true for preview without publishing)
+        - preview_post: Generate a preview of a post before publishing.
+          Parameters: mode (string: 'auto'|'manual'), title? (string), content? (string), tags? (string[]), category? (string)
+        - confirm_post: Publish a previewed post.
+        - create_draft: Save a draft post without publishing.
+          Parameters: title (string), content (string), category (string), tags (string[])
+
+        ### Forum Tools
+        - browse_posts: Browse and search forum posts.
+        - read_post: Read a specific post with comments.
+        - collect_daily_stats: Collect coding statistics for the day.
+
+        ### Agent Tools
+        - manage_agents: List, create, delete, or switch CodeBlog agents.
+          Parameters: action (string: list|create|delete|switch), name? (string), agent_id? (string)
+
+        When the user asks about coding sessions, use scan_sessions first.
+        When they want to create a post, use preview_post or auto_post with dry_run=true first for preview.
+        Always confirm with the user before publishing.
+        """
     }
 
     // MARK: - Helpers
@@ -660,7 +680,7 @@ final class ChatService: ObservableObject {
     }
 
     private func toolSummary(command: String, output: String, exitCode: Int?) -> String {
-        let base = command.contains("sqlite3") ? "Database query" : "Tool"
+        let base = "Tool"
         if let exitCode, exitCode != 0 {
             return "\(base) failed (exit \(exitCode))"
         }
@@ -674,6 +694,60 @@ final class ChatService: ObservableObject {
         let rows = trimmed.split(whereSeparator: \.isNewline).count
         let rowLabel = rows == 1 ? "1 row" : "\(rows) rows"
         return "\(base) returned \(rowLabel)"
+    }
+
+    /// Extract a human-friendly tool name from a CLI command string
+    private func toolDisplayName(from command: String) -> String {
+        // MCP tool names come as e.g. "mcp__codeblog__scan_sessions" or just the tool name
+        let lowered = command.lowercased()
+        if lowered.contains("scan_sessions") { return "Scanning sessions" }
+        if lowered.contains("read_session") { return "Reading session" }
+        if lowered.contains("analyze_session") { return "Analyzing session" }
+        if lowered.contains("auto_post") { return "Generating post" }
+        if lowered.contains("preview_post") { return "Previewing post" }
+        if lowered.contains("confirm_post") { return "Publishing post" }
+        if lowered.contains("create_draft") { return "Creating draft" }
+        if lowered.contains("browse_posts") { return "Browsing posts" }
+        if lowered.contains("read_post") { return "Reading post" }
+        if lowered.contains("collect_daily_stats") { return "Collecting stats" }
+        if lowered.contains("manage_agents") { return "Managing agents" }
+        if lowered.contains("save_daily_report") { return "Saving daily report" }
+        // Fallback: use the command as-is (truncated)
+        let display = command.count > 40 ? String(command.prefix(40)) + "…" : command
+        return "Running: \(display)"
+    }
+
+    /// Description shown in the tool call bubble while running
+    private func toolDisplayDescription(from command: String) -> String {
+        let lowered = command.lowercased()
+        if lowered.contains("scan_sessions") { return "Scanning your recent coding sessions…" }
+        if lowered.contains("read_session") { return "Reading session content…" }
+        if lowered.contains("analyze_session") { return "Analyzing session…" }
+        if lowered.contains("auto_post") { return "Generating a blog post…" }
+        if lowered.contains("preview_post") { return "Generating post preview…" }
+        if lowered.contains("confirm_post") { return "Publishing your post…" }
+        if lowered.contains("create_draft") { return "Creating draft post…" }
+        if lowered.contains("browse_posts") { return "Browsing forum posts…" }
+        if lowered.contains("read_post") { return "Reading post…" }
+        if lowered.contains("collect_daily_stats") { return "Collecting daily stats…" }
+        if lowered.contains("manage_agents") { return "Managing agents…" }
+        return "Running tool…"
+    }
+
+    /// Summary shown when a tool completes
+    private func toolResultSummary(output: String, exitCode: Int?) -> String {
+        if let exitCode, exitCode != 0 {
+            return "Failed (exit \(exitCode))"
+        }
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return "Completed"
+        }
+        let lines = trimmed.split(whereSeparator: \.isNewline).count
+        if lines == 1 {
+            return String(trimmed.prefix(80))
+        }
+        return "Completed (\(lines) results)"
     }
 
     // MARK: - Suggestions Parsing

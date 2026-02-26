@@ -197,7 +197,7 @@ private extension AttributedString {
 
         var text = AttributedString("Started the morning deep in debugging mode around ", attributes: base)
         text += AttributedString("8:45 AM", attributes: emphasized)
-        text += AttributedString(", wrestling with dashboard cards that refused to ", attributes: base)
+        text += AttributedString(", wrestling with agent chat cards that refused to ", attributes: base)
         text += AttributedString("show up.", attributes: emphasized)
         text += AttributedString(" Classic case of “why isn’t this simple thing working?” Had to dig through using Claude and even fire up Beekeeper Studio to check logs.", attributes: secondary)
         return text

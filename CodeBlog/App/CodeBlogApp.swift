@@ -200,6 +200,8 @@ struct CodeBlogApp: App {
                     UserDefaults.standard.set(0, forKey: "onboardingStep")
                     // Reset the selected LLM provider to default
                     UserDefaults.standard.set("gemini", forKey: "selectedLLMProvider")
+                    UserDefaults.standard.set(false, forKey: "isFirstLaunchAfterOnboarding")
+                    UserDefaults.standard.set(false, forKey: "shouldAutoScanAfterOnboarding")
                     // Clear login state so user goes through login again
                     CodeBlogAuthService.shared.logout()
                     // Force quit and restart the app to show onboarding

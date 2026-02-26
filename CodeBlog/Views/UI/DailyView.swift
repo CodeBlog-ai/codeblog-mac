@@ -48,9 +48,9 @@ struct DailyView: View {
     @State private var standupCopyResetTask: Task<Void, Never>? = nil
 
     private let requiredCodeHash = "6979ce2825cb3f440f987bbc487d62087c333abb99b56062c561ca557392d960"
-    private let betaNoticeCopy = "Daily is a new way to visualize your day and turn it into a standup update fast."
-    private let onboardingNoticeCopy = "Currently doing custom onboarding while we refine the workflow. If you’re interested, book some time and I’ll walk you through it."
-    private let onboardingBookingURL = "https://cal.com/jerry-liu/15min"
+    private let betaNoticeCopy = "CodeBlog Daily visualizes your coding day and turns it into a standup update fast."
+    private let onboardingNoticeCopy = "We’re rolling out access gradually. If you’re interested, book a quick call and we’ll get you set up."
+    private let onboardingBookingURL = "https://cal.com/simen-yifei/15min"
 
     var body: some View {
         ZStack {

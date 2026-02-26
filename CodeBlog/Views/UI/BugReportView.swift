@@ -2,9 +2,9 @@ import SwiftUI
 import AppKit
 
 struct BugReportView: View {
-    private let emailAddress = "liu.z.jerry@gmail.com"
-    private let discordInviteURL = URL(string: "https://discord.gg/9YPAtctE6k")
-    private let callBookingURL = URL(string: "https://cal.com/jerry-liu/15min")
+    private let emailAddress = "zhaojinsong03@gmail.com"
+    private let discordInviteURL = URL(string: "https://discord.gg/msUAA8Gu")
+    private let callBookingURL = URL(string: "https://cal.com/simen-yifei/15min")
     @State private var didCopyEmail = false
     @State private var copyResetTask: DispatchWorkItem? = nil
     @State private var didCopyDebugLogs = false

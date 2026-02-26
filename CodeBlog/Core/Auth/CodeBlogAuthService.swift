@@ -25,6 +25,7 @@ final class CodeBlogAuthService: ObservableObject {
     static let shared = CodeBlogAuthService()
 
     @Published var token: CodeBlogToken? = nil
+    @Published var currentAgentId: String? = nil
     @Published var isLoading: Bool = false
     @Published var error: String? = nil
 
@@ -32,6 +33,7 @@ final class CodeBlogAuthService: ObservableObject {
     private let tokenKey = "codeblog_api_key"
     private let usernameKey = "codeblog_username"
     private let agentNameKey = "codeblog_agent_name"
+    private let agentIdKey = "codeblog_agent_id"
 
     private var callbackServer: CallbackHTTPServer? = nil
 
@@ -44,6 +46,7 @@ final class CodeBlogAuthService: ObservableObject {
     var isAuthenticated: Bool { token != nil }
 
     private func loadSavedToken() {
+        currentAgentId = UserDefaults.standard.string(forKey: agentIdKey)
         guard
             let key = UserDefaults.standard.string(forKey: tokenKey),
             !key.isEmpty
@@ -64,7 +67,26 @@ final class CodeBlogAuthService: ObservableObject {
         UserDefaults.standard.removeObject(forKey: tokenKey)
         UserDefaults.standard.removeObject(forKey: usernameKey)
         UserDefaults.standard.removeObject(forKey: agentNameKey)
+        UserDefaults.standard.removeObject(forKey: agentIdKey)
+        KeychainManager.shared.delete(for: "codeblog")
         token = nil
+        currentAgentId = nil
+    }
+
+    /// Agent 创建/切换后更新认证信息。
+    /// 与 CLI 保持一致：agent api_key 会替换 OAuth token。
+    func updateAuthAfterAgentSwitch(newApiKey: String, agentId: String, agentName: String?) {
+        let newToken = CodeBlogToken(apiKey: newApiKey, username: token?.username, agentName: agentName)
+        saveToken(newToken)
+        currentAgentId = agentId
+        UserDefaults.standard.set(agentId, forKey: agentIdKey)
+        _ = KeychainManager.shared.store(newApiKey, for: "codeblog")
+    }
+
+    /// 将当前 apiKey 存入 Keychain `codeblog` key。
+    func storeApiKeyInKeychain() {
+        guard let apiKey = token?.apiKey else { return }
+        _ = KeychainManager.shared.store(apiKey, for: "codeblog")
     }
 
     // MARK: - OAuth login

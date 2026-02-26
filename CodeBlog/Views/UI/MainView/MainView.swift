@@ -15,7 +15,8 @@ import Sentry
 struct MainView: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var categoryStore: CategoryStore
-    @State var selectedIcon: SidebarIcon = .timeline
+    @AppStorage("isFirstLaunchAfterOnboarding") var isFirstLaunchAfterOnboarding = false
+    @State var selectedIcon: SidebarIcon = .agent
     @State var selectedDate = timelineDisplayDate(from: Date())
     @State var showDatePicker = false
     @State var selectedActivity: TimelineActivity? = nil

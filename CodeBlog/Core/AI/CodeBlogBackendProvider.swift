@@ -15,11 +15,11 @@ final class CodeBlogBackendProvider {
     }
 
     func transcribeScreenshots(_ screenshots: [Screenshot], batchStartTime: Date, batchId: Int64?) async throws -> (observations: [Observation], log: LLMCall) {
-        fatalError("CodeBlogBackendProvider not implemented yet")
+        throw unsupportedFeatureError()
     }
 
     func generateActivityCards(observations: [Observation], context: ActivityGenerationContext, batchId: Int64?) async throws -> (cards: [ActivityCardData], log: LLMCall) {
-        fatalError("CodeBlogBackendProvider not implemented yet")
+        throw unsupportedFeatureError()
     }
 
     func generateText(prompt: String) async throws -> (text: String, log: LLMCall) {
@@ -27,6 +27,14 @@ final class CodeBlogBackendProvider {
             domain: "CodeBlogBackend",
             code: -1,
             userInfo: [NSLocalizedDescriptionKey: "Text generation is not yet supported with CodeBlog Backend. Please configure Gemini, Ollama, or ChatGPT/Claude CLI in Settings."]
+        )
+    }
+
+    private func unsupportedFeatureError() -> NSError {
+        NSError(
+            domain: "CodeBlogBackend",
+            code: -1,
+            userInfo: [NSLocalizedDescriptionKey: "CodeBlog Backend timeline analysis is not available yet. Please configure Gemini, Ollama, or ChatGPT/Claude CLI in Settings."]
         )
     }
 }

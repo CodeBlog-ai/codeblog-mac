@@ -58,7 +58,7 @@ extension MainView {
         // 1. Timeline is visible (not in settings)
         // 2. No modal is open
         // 3. Selected date is today
-        guard selectedIcon != .settings,
+        guard selectedIcon == .timeline,
               !showDatePicker,
               timelineIsToday(selectedDate) else {
             return
