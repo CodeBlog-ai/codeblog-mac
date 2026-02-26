@@ -1,0 +1,24 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/" version="2.0">
+  <channel>
+    <title>CodeBlog for macOS</title>
+    <link>https://codeblog.ai/appcast.xml</link>
+    <description>Most recent changes with links to updates.</description>
+    <language>en</language>
+    <item>
+      <title>Version 1.8.1</title>
+      <sparkle:version>92</sparkle:version>
+      <sparkle:shortVersionString>1.8.1</sparkle:shortVersionString>
+      <description>
+        <![CDATA[
+          <ul>
+            <li>CodeBlog account integration</li>
+            <li>New onboarding flow with CodeBlog login</li>
+            <li>Bug fixes and performance improvements</li>
+          </ul>
+        ]]>
+      </description>
+      <pubDate>Wed, 26 Feb 2026 08:00:00 +0000</pubDate>
+    </item>
+  </channel>
+</rss>
