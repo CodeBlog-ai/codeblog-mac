@@ -26,12 +26,14 @@ struct ChatView: View {
     @AppStorage("chatCLIPreferredTool") private var selectedTool: String = "codex"
     @State private var showToolSwitchConfirm = false
     @State private var pendingToolSelection: String?
-    @State private var conversationId: UUID?
     @State private var didAnimateWelcome = false
     @State private var showAgentPicker = false
     @State private var showModelPicker = false
     @State private var availableAgents: [CodeBlogAPIService.AgentInfo] = []
     @State private var isSwitchingAgent = false
+    @State private var showHistoryPopover = false
+    @State private var isEditingTitle = false
+    @State private var editingTitleText = ""
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var welcomePrompts: [WelcomePrompt] {
@@ -80,6 +82,9 @@ struct ChatView: View {
                 debugPanel
             }
         }
+        .onAppear {
+            chatService.loadConversationsList()
+        }
         .alert("Switch model?", isPresented: $showToolSwitchConfirm) {
             Button("Switch and Reset", role: .destructive) {
                 confirmToolSwitch()
@@ -94,44 +99,84 @@ struct ChatView: View {
 
     private var chatContent: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header buttons
-            HStack(spacing: 8) {
-                Spacer()
+            // Header: [History] --- [Title] --- [New Chat +] [Debug]
+            ZStack {
+                // Center: Conversation title (truly centered)
+                if isEditingTitle {
+                    TextField("Chat title", text: $editingTitleText)
+                        .font(.custom("Nunito", size: 13).weight(.semibold))
+                        .foregroundColor(Color(hex: "4A4A4A"))
+                        .multilineTextAlignment(.center)
+                        .textFieldStyle(.plain)
+                        .frame(maxWidth: 200)
+                        .onSubmit {
+                            chatService.renameConversation(title: editingTitleText)
+                            isEditingTitle = false
+                        }
+                } else {
+                    Text(chatService.currentConversationTitle)
+                        .font(.custom("Nunito", size: 13).weight(.semibold))
+                        .foregroundColor(Color(hex: "4A4A4A"))
+                        .lineLimit(1)
+                        .onTapGesture {
+                            if chatService.currentConversationId != nil {
+                                editingTitleText = chatService.currentConversationTitle
+                                isEditingTitle = true
+                            }
+                        }
+                }
 
-                // Clear chat button (only show if there are messages)
-                if !chatService.messages.isEmpty {
-                    Button(action: { resetConversation() }) {
-                        Text("Clear")
-                            .font(.custom("Nunito", size: 12).weight(.semibold))
-                            .foregroundColor(Color(hex: "F96E00"))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .fill(Color(hex: "FFF4E9"))
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .stroke(Color(hex: "F96E00").opacity(0.25), lineWidth: 1)
-                            )
+                // Left + Right buttons
+                HStack(spacing: 0) {
+                    // Left: History button
+                    Button(action: {
+                        chatService.loadConversationsList()
+                        showHistoryPopover.toggle()
+                    }) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 14, weight: .regular))
+                            .foregroundColor(Color(hex: "999999"))
+                            .frame(width: 32, height: 32)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .help("Clear chat")
                     .pointingHandCursor()
-                }
+                    .help("Chat history")
+                    .popover(isPresented: $showHistoryPopover, arrowEdge: .bottom) {
+                        historyPopoverContent
+                    }
 
-                // Debug toggle
-                Button(action: { chatService.showDebugPanel.toggle() }) {
-                    Image(systemName: chatService.showDebugPanel ? "ladybug.fill" : "ladybug")
-                        .font(.system(size: 14))
-                        .foregroundColor(chatService.showDebugPanel ? Color(hex: "F96E00") : Color(hex: "999999"))
+                    Spacer()
+
+                    // Right: New chat + Debug
+                    HStack(spacing: 6) {
+                        Button(action: {
+                            chatService.startNewConversation()
+                        }) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(Color(hex: "999999"))
+                                .frame(width: 28, height: 28)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .pointingHandCursor()
+                        .help("New chat")
+
+                        Button(action: { chatService.showDebugPanel.toggle() }) {
+                            Image(systemName: chatService.showDebugPanel ? "ladybug.fill" : "ladybug")
+                                .font(.system(size: 14))
+                                .foregroundColor(chatService.showDebugPanel ? Color(hex: "F96E00") : Color(hex: "999999"))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Toggle debug panel")
+                        .pointingHandCursor()
+                    }
                 }
-                .buttonStyle(.plain)
-                .help("Toggle debug panel")
-                .pointingHandCursor()
             }
-            .padding(.trailing, 12)
+            .padding(.horizontal, 12)
             .padding(.top, 8)
+            .padding(.bottom, 4)
 
             // Messages area
             ScrollViewReader { proxy in
@@ -149,7 +194,9 @@ struct ChatView: View {
                                index == insertionIndex {
                                 WorkStatusCard(status: status, showDetails: $showWorkDetails)
                             }
-                            MessageBubble(message: message)
+                            MessageBubble(message: message) { messageId, newText in
+                                editAndResend(messageId: messageId, text: newText)
+                            }
                         }
                         if let status = chatService.workStatus,
                            let insertionIndex = statusInsertionIndex,
@@ -783,6 +830,95 @@ struct ChatView: View {
         withAnimation { showModelPicker = false }
     }
 
+    // MARK: - History Popover
+
+    private var historyPopoverContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Recent Chats")
+                    .font(.custom("Nunito", size: 13).weight(.bold))
+                    .foregroundColor(Color(hex: "4A4A4A"))
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 8)
+
+            if chatService.conversations.isEmpty {
+                Text("No conversations yet")
+                    .font(.custom("Nunito", size: 12).weight(.medium))
+                    .foregroundColor(Color(hex: "BBBBBB"))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 20)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(chatService.conversations) { conv in
+                            historyRow(conv: conv)
+                        }
+                    }
+                }
+                .frame(maxHeight: 300)
+            }
+        }
+        .frame(width: 260)
+        .padding(.bottom, 8)
+    }
+
+    private func historyRow(conv: ChatConversation) -> some View {
+        let isActive = chatService.currentConversationId == conv.id
+
+        return Button(action: {
+            chatService.loadConversation(id: conv.id)
+            showHistoryPopover = false
+        }) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(conv.title)
+                        .font(.custom("Nunito", size: 12).weight(isActive ? .bold : .medium))
+                        .foregroundColor(isActive ? Color(hex: "F96E00") : Color(hex: "4A4A4A"))
+                        .lineLimit(1)
+
+                    Text(relativeTimeString(conv.updatedAt))
+                        .font(.custom("Nunito", size: 10).weight(.regular))
+                        .foregroundColor(Color(hex: "BBBBBB"))
+                }
+
+                Spacer()
+
+                if isActive {
+                    Circle()
+                        .fill(Color(hex: "F96E00"))
+                        .frame(width: 6, height: 6)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(isActive ? Color(hex: "FFF4E9") : Color.clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .contextMenu {
+            Button(role: .destructive) {
+                chatService.deleteConversation(id: conv.id)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+    }
+
+    private func relativeTimeString(_ date: Date) -> String {
+        let interval = Date().timeIntervalSince(date)
+        if interval < 60 { return "Just now" }
+        if interval < 3600 { return "\(Int(interval / 60))m ago" }
+        if interval < 86400 { return "\(Int(interval / 3600))h ago" }
+        if interval < 604800 { return "\(Int(interval / 86400))d ago" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return formatter.string(from: date)
+    }
+
     private var statusInsertionIndex: Int? {
         guard chatService.workStatus != nil else { return nil }
         // Always show at the end (after the latest user message)
@@ -798,12 +934,15 @@ struct ChatView: View {
                 .foregroundColor(Color(hex: "999999"))
 
             FlowLayout(spacing: 8) {
-                ForEach(chatService.currentSuggestions, id: \.self) { suggestion in
+                ForEach(Array(chatService.currentSuggestions.enumerated()), id: \.element) { index, suggestion in
                     SuggestionChip(text: suggestion) {
-                        inputText = suggestion
-                        isInputFocused = true
-                        composerFocusToken += 1
+                        sendMessage(suggestion)
                     }
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
+                    .animation(
+                        .spring(response: 0.4, dampingFraction: 0.7).delay(Double(index) * 0.08),
+                        value: chatService.currentSuggestions.count
+                    )
                 }
             }
         }
@@ -824,10 +963,7 @@ struct ChatView: View {
         inputText = ""
 
         // Track conversation for analytics
-        let isNewConversation = conversationId == nil || chatService.messages.isEmpty
-        if isNewConversation {
-            conversationId = UUID()
-        }
+        let isNewConversation = chatService.currentConversationId == nil || chatService.messages.isEmpty
 
         // Count only user messages for index
         let messageIndex = chatService.messages.filter { $0.role == .user }.count
@@ -835,7 +971,7 @@ struct ChatView: View {
         // Log question to PostHog
         AnalyticsService.shared.capture("chat_question_asked", [
             "question": messageText,
-            "conversation_id": conversationId?.uuidString ?? "unknown",
+            "conversation_id": chatService.currentConversationId?.uuidString ?? "unknown",
             "is_new_conversation": isNewConversation,
             "message_index": messageIndex,
             "provider": selectedTool
@@ -848,7 +984,12 @@ struct ChatView: View {
 
     private func resetConversation() {
         chatService.clearConversation()
-        conversationId = nil
+    }
+
+    private func editAndResend(messageId: UUID, text: String) {
+        guard !chatService.isProcessing else { return }
+        chatService.deleteMessagesFrom(id: messageId)
+        sendMessage(text)
     }
 
     private func copyDebugLog() {
@@ -895,6 +1036,10 @@ struct ChatView: View {
 
 private struct MessageBubble: View {
     let message: ChatMessage
+    var onEditResend: ((UUID, String) -> Void)? = nil
+    @State private var isHovered = false
+    @State private var isEditing = false
+    @State private var editText = ""
 
     var body: some View {
         switch message.role {
@@ -908,17 +1053,118 @@ private struct MessageBubble: View {
     }
 
     private var userBubble: some View {
-        HStack {
-            Spacer(minLength: 60)
-            Text(message.content)
-                .font(.custom("Nunito", size: 13).weight(.medium))
-                .foregroundColor(.white)
-                .textSelection(.enabled)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(Color(hex: "F98D3D"))
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        VStack(alignment: .trailing, spacing: 2) {
+            if isEditing {
+                // Inline edit mode
+                HStack {
+                    Spacer(minLength: 60)
+                    VStack(alignment: .trailing, spacing: 8) {
+                        TextField("", text: $editText, axis: .vertical)
+                            .font(.custom("Nunito", size: 13).weight(.medium))
+                            .foregroundColor(Color(hex: "2F2A24"))
+                            .textFieldStyle(.plain)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(Color.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .stroke(Color(hex: "F96E00").opacity(0.4), lineWidth: 1)
+                            )
+                            .onSubmit {
+                                submitEdit()
+                            }
+
+                        HStack(spacing: 8) {
+                            Button("Cancel") {
+                                isEditing = false
+                            }
+                            .font(.custom("Nunito", size: 11).weight(.medium))
+                            .foregroundColor(Color(hex: "999999"))
+                            .buttonStyle(.plain)
+                            .pointingHandCursor()
+
+                            Button(action: { submitEdit() }) {
+                                Text("Send")
+                                    .font(.custom("Nunito", size: 11).weight(.bold))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 4)
+                                    .background(Color(hex: "F96E00"))
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .pointingHandCursor()
+                        }
+                    }
+                }
+            } else {
+                // Message bubble
+                HStack {
+                    Spacer(minLength: 60)
+                    Text(message.content)
+                        .font(.custom("Nunito", size: 13).weight(.medium))
+                        .foregroundColor(.white)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(Color(hex: "F98D3D"))
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+
+                // Always-present action row (fixed height, no layout shift)
+                HStack(spacing: 2) {
+                    Button(action: {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(message.content, forType: .string)
+                    }) {
+                        Image("IconCopy")
+                            .renderingMode(.template)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 13, height: 13)
+                            .foregroundColor(Color(hex: "BBBBBB"))
+                            .frame(width: 26, height: 20)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                    .help("Copy")
+
+                    Button(action: {
+                        editText = message.content
+                        isEditing = true
+                    }) {
+                        Image("IconEdit")
+                            .renderingMode(.template)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 13, height: 13)
+                            .foregroundColor(Color(hex: "BBBBBB"))
+                            .frame(width: 26, height: 20)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                    .help("Edit")
+                }
+                .opacity(isHovered ? 1 : 0)
+                .allowsHitTesting(isHovered)
+            }
         }
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.15)) {
+                isHovered = hovering
+            }
+        }
+    }
+
+    private func submitEdit() {
+        let trimmed = editText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        isEditing = false
+        onEditResend?(message.id, trimmed)
     }
 
     private var assistantBubble: some View {
@@ -1021,6 +1267,8 @@ private struct MarkdownBlockRenderer: View {
                 case .horizontalRule:
                     Divider()
                         .padding(.vertical, 4)
+                case .table(let headers, let rows):
+                    tableView(headers: headers, rows: rows)
                 }
             }
         }
@@ -1035,6 +1283,7 @@ private struct MarkdownBlockRenderer: View {
         case listItem(text: String, ordered: Bool, index: Int)
         case blockquote(text: String)
         case horizontalRule
+        case table(headers: [String], rows: [[String]])
     }
 
     private func parseBlocks() -> [MarkdownBlock] {
@@ -1071,6 +1320,10 @@ private struct MarkdownBlockRenderer: View {
                     }
                     codeLines.append(codeLine)
                     i += 1
+                }
+                // Skip suggestions blocks -- they are rendered as follow-up chips
+                if lang.lowercased() == "suggestions" {
+                    continue
                 }
                 let code = codeLines.joined(separator: "\n")
                 blocks.append(.codeBlock(language: lang.isEmpty ? nil : lang, code: code))
@@ -1112,6 +1365,47 @@ private struct MarkdownBlockRenderer: View {
                 continue
             }
 
+            // Table: detect rows starting and ending with |
+            if trimmed.hasPrefix("|") && trimmed.hasSuffix("|") {
+                flushParagraph()
+                var tableLines: [String] = [trimmed]
+                i += 1
+                while i < lines.count {
+                    let nextTrimmed = lines[i].trimmingCharacters(in: .whitespaces)
+                    if nextTrimmed.hasPrefix("|") && nextTrimmed.hasSuffix("|") {
+                        tableLines.append(nextTrimmed)
+                        i += 1
+                    } else {
+                        break
+                    }
+                }
+
+                if tableLines.count >= 2 {
+                    let parseRow: (String) -> [String] = { line in
+                        let inner = line.dropFirst().dropLast()
+                        return inner.components(separatedBy: "|").map {
+                            $0.trimmingCharacters(in: .whitespaces)
+                        }
+                    }
+
+                    let headerCells = parseRow(tableLines[0])
+                    let separatorChars = CharacterSet(charactersIn: "-:| ")
+                    let isSeparator = tableLines[1].unicodeScalars.allSatisfy {
+                        separatorChars.contains($0)
+                    }
+                    let dataStart = isSeparator ? 2 : 1
+                    var dataRows: [[String]] = []
+                    for rowIdx in dataStart..<tableLines.count {
+                        dataRows.append(parseRow(tableLines[rowIdx]))
+                    }
+                    blocks.append(.table(headers: headerCells, rows: dataRows))
+                } else {
+                    paragraphBuffer.append(contentsOf: tableLines)
+                }
+                orderedIndex = 0
+                continue
+            }
+
             // Unordered list item
             if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ") {
                 flushParagraph()
@@ -1148,6 +1442,12 @@ private struct MarkdownBlockRenderer: View {
             // Regular text line
             paragraphBuffer.append(line)
             i += 1
+        }
+
+        // Suppress incomplete suggestions block during streaming
+        let bufferText = paragraphBuffer.joined(separator: "\n")
+        if bufferText.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("```suggestions") {
+            paragraphBuffer = []
         }
 
         flushParagraph()
@@ -1265,6 +1565,54 @@ private struct MarkdownBlockRenderer: View {
                 .padding(.leading, 10)
         }
         .padding(.vertical, 4)
+    }
+
+    private func tableView(headers: [String], rows: [[String]]) -> some View {
+        let columnCount = headers.count
+
+        return VStack(alignment: .leading, spacing: 0) {
+            // Header row
+            HStack(spacing: 0) {
+                ForEach(0..<columnCount, id: \.self) { col in
+                    Text(headers[col])
+                        .font(.custom("Nunito", size: 12).weight(.bold))
+                        .foregroundColor(Color(hex: "2F2A24"))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                }
+            }
+            .background(Color(hex: "F5EDE4"))
+
+            Rectangle()
+                .fill(Color(hex: "E0D5C8"))
+                .frame(height: 1)
+
+            // Data rows
+            ForEach(0..<rows.count, id: \.self) { rowIdx in
+                HStack(spacing: 0) {
+                    ForEach(0..<columnCount, id: \.self) { col in
+                        let cellText = col < rows[rowIdx].count ? rows[rowIdx][col] : ""
+                        inlineMarkdownText(cellText)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                    }
+                }
+                .background(rowIdx % 2 == 0 ? Color.clear : Color(hex: "FAF7F3"))
+
+                if rowIdx < rows.count - 1 {
+                    Rectangle()
+                        .fill(Color(hex: "EEEEEE").opacity(0.5))
+                        .frame(height: 0.5)
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color(hex: "E0D5C8"), lineWidth: 1)
+        )
     }
 
     @ViewBuilder
@@ -1931,42 +2279,50 @@ private struct ChatChartBlockView: View {
 private struct WorkStatusCard: View {
     let status: ChatWorkStatus
     @Binding var showDetails: Bool
+    @State private var shimmerOffset: CGFloat = -1.0
 
     var body: some View {
         // Only show when thinking or answering (tool calls are shown as chat messages)
         if status.stage == .thinking || status.stage == .answering {
             HStack {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     Image(systemName: headerIcon)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(accentColor)
-                        .frame(width: 14, height: 14, alignment: .center)
+                        .frame(width: 12, height: 12, alignment: .center)
 
                     HStack(spacing: 0) {
                         Text(headerTitle)
                         AnimatedEllipsis()
                     }
-                    .font(.custom("Nunito", size: 12).weight(.semibold))
+                    .font(.custom("Nunito", size: 11).weight(.semibold))
                     .foregroundColor(Color(hex: "4A4A4A"))
-
-                    Spacer()
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
                 .background(
-                    LinearGradient(
-                        colors: [Color(hex: "FFF8F0"), Color(hex: "FFF4E9")],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
+                    ZStack {
+                        LinearGradient(
+                            colors: [Color(hex: "FFF8F0"), Color(hex: "FFF4E9")],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                        ShimmerOverlay(offset: shimmerOffset)
+                            .blendMode(.softLight)
+                    }
                 )
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .stroke(Color(hex: "F0CBA7"), lineWidth: 1)
                 )
 
-                Spacer(minLength: 60)
+                Spacer()
+            }
+            .onAppear {
+                withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: false)) {
+                    shimmerOffset = 1.0
+                }
             }
         } else if status.stage == .error, let message = status.errorMessage, !message.isEmpty {
             HStack {
@@ -2058,6 +2414,10 @@ private struct AppKitComposerTextField: NSViewRepresentable {
         context.coordinator.parent = self
 
         if nsView.stringValue != text {
+            // Terminate any active IME composition (e.g. Chinese input) before clearing
+            if text.isEmpty {
+                nsView.abortEditing()
+            }
             nsView.stringValue = text
         }
         nsView.refreshPlaceholderVisibility()

@@ -116,12 +116,16 @@ final class ChatService: ObservableObject {
     @Published private(set) var workStatus: ChatWorkStatus?
     @Published private(set) var currentSuggestions: [String] = []
     @Published var showDebugPanel = false
+    @Published private(set) var currentConversationId: UUID?
+    @Published private(set) var currentConversationTitle: String = "New Chat"
+    @Published private(set) var conversations: [ChatConversation] = []
 
     // MARK: - Private
 
     private var conversationHistory: [(role: String, content: String)] = []
     private var currentSessionId: String?
     private var currentProcessingTask: Task<Void, Never>?
+    private let storage = ChatStorageManager.shared
 
     // MARK: - Debug Logging
 
@@ -138,6 +142,11 @@ final class ChatService: ObservableObject {
 
     // MARK: - Public API
 
+    /// Load conversations list on startup
+    func loadConversationsList() {
+        conversations = storage.fetchConversations()
+    }
+
     /// Send a user message and get a response
     func sendMessage(_ content: String) async {
         guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
@@ -149,11 +158,27 @@ final class ChatService: ObservableObject {
         workStatus = nil
         currentSuggestions = []
 
+        // Auto-create conversation on first message
+        if currentConversationId == nil {
+            let convId = UUID()
+            let title = String(content.prefix(30))
+            currentConversationId = convId
+            currentConversationTitle = title
+            storage.createConversation(id: convId, title: title)
+            conversations = storage.fetchConversations()
+        }
+
         // Add user message
         let userMessage = ChatMessage.user(content)
         messages.append(userMessage)
         conversationHistory.append((role: "user", content: content))
         log(.user, content)
+
+        // Persist user message
+        if let convId = currentConversationId {
+            storage.saveMessage(conversationId: convId, message: userMessage)
+            storage.updateConversationTimestamp(id: convId)
+        }
 
         // Process with potential tool calls (store task for cancellation)
         let task = Task { @MainActor in
@@ -195,6 +220,69 @@ final class ChatService: ObservableObject {
         workStatus = nil
         currentSuggestions = []
         currentSessionId = nil
+        currentConversationId = nil
+        currentConversationTitle = "New Chat"
+    }
+
+    /// Start a new conversation (clears current and resets state)
+    func startNewConversation() {
+        clearConversation()
+    }
+
+    /// Load a conversation from storage
+    func loadConversation(id: UUID) {
+        guard let conv = conversations.first(where: { $0.id == id }) else { return }
+        clearConversation()
+
+        currentConversationId = conv.id
+        currentConversationTitle = conv.title
+
+        let stored = storage.fetchMessages(conversationId: id)
+        messages = stored
+
+        // Rebuild conversation history for LLM context
+        for msg in stored {
+            switch msg.role {
+            case .user: conversationHistory.append((role: "user", content: msg.content))
+            case .assistant: conversationHistory.append((role: "assistant", content: msg.content))
+            case .toolCall: break
+            }
+        }
+    }
+
+    /// Rename the current conversation
+    func renameConversation(title: String) {
+        guard let convId = currentConversationId else { return }
+        currentConversationTitle = title
+        storage.updateTitle(id: convId, title: title)
+        conversations = storage.fetchConversations()
+    }
+
+    /// Delete a conversation
+    func deleteConversation(id: UUID) {
+        storage.deleteConversation(id: id)
+        conversations = storage.fetchConversations()
+        // If deleted conversation was the current one, clear it
+        if currentConversationId == id {
+            clearConversation()
+        }
+    }
+
+    /// Delete a message and all subsequent messages (for edit-resend)
+    func deleteMessagesFrom(id: UUID) {
+        guard let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        let removedCount = messages.count - index
+        messages.removeSubrange(index...)
+        // Remove corresponding entries from conversation history
+        let historyRemoveCount = min(removedCount, conversationHistory.count)
+        if historyRemoveCount > 0 {
+            conversationHistory.removeLast(historyRemoveCount)
+        }
+        currentSuggestions = []
+        // Also remove from storage
+        if let convId = currentConversationId {
+            storage.deleteMessagesFrom(conversationId: convId, messageId: id)
+        }
     }
 
     // MARK: - Conversation Processing
@@ -261,13 +349,36 @@ final class ChatService: ObservableObject {
                     log(.toolDetected, "Starting: \(command)")
                     let toolId = UUID()
                     currentToolId = toolId
-                    // Insert a visible tool call message in the chat
-                    let toolMsg = ChatMessage.toolCall(
-                        toolDisplayName(from: command),
-                        description: toolDisplayDescription(from: command)
+
+                    let stepName = toolDisplayName(from: command)
+                    let stepDesc = toolDisplayDescription(from: command)
+                    let newStep = ChatMessage.ToolStep(
+                        id: toolId,
+                        name: stepName,
+                        description: stepDesc,
+                        status: .running
                     )
-                    currentToolMessageId = toolMsg.id
-                    messages.append(toolMsg)
+
+                    if let msgId = currentToolMessageId,
+                       let idx = messages.firstIndex(where: { $0.id == msgId }) {
+                        // Reuse existing tool message — add a new step
+                        var updated = messages[idx]
+                        updated.toolSteps.append(newStep)
+                        updated.toolStatus = .running
+                        updated.content = stepDesc
+                        messages[idx] = updated
+                    } else {
+                        // First tool call in this response — create message
+                        let toolMsg = ChatMessage(
+                            role: .toolCall,
+                            content: stepDesc,
+                            toolStatus: .running,
+                            toolSteps: [newStep]
+                        )
+                        currentToolMessageId = toolMsg.id
+                        messages.append(toolMsg)
+                    }
+
                     updateWorkStatus { status in
                         status.stage = .runningTools
                         status.tools.append(ChatWorkStatus.ToolRun(
@@ -283,17 +394,23 @@ final class ChatService: ObservableObject {
                 case .toolEnd(let output, let exitCode):
                     log(.toolResult, "Exit \(exitCode ?? 0): \(output.prefix(100))...")
                     let toolId = currentToolId
-                    // Update the tool call message with result
+                    let summary = toolResultSummary(output: output, exitCode: exitCode)
+
+                    // Update the specific step within the tool message
                     if let msgId = currentToolMessageId,
                        let idx = messages.firstIndex(where: { $0.id == msgId }) {
-                        let summary = toolResultSummary(output: output, exitCode: exitCode)
-                        if let exitCode, exitCode != 0 {
-                            messages[idx] = messages[idx].failed(error: summary)
-                        } else {
-                            messages[idx] = messages[idx].completed(summary: summary)
+                        if let stepIdx = messages[idx].toolSteps.firstIndex(where: { $0.id == toolId }) {
+                            if let exitCode, exitCode != 0 {
+                                messages[idx].toolSteps[stepIdx].status = .failed(error: summary)
+                            } else {
+                                messages[idx].toolSteps[stepIdx].status = .completed(summary: summary)
+                            }
                         }
+                        // Keep overall status as running (more tools may come)
+                        // Update content to show latest status
+                        messages[idx].content = summary
                     }
-                    currentToolMessageId = nil
+                    // Don't clear currentToolMessageId — keep it for next tool in same response
                     updateWorkStatus { status in
                         let toolIndex = toolCompletionIndex(in: status, preferredId: toolId)
                         guard let toolIndex else { return }
@@ -320,6 +437,15 @@ final class ChatService: ObservableObject {
                     sawTextDelta = true
                     appendWithToolSeparatorIfNeeded(chunk)
                     streamingText = responseText
+                    // Finalize tool message when text starts arriving
+                    if let toolMsgId = currentToolMessageId,
+                       let toolIdx = messages.firstIndex(where: { $0.id == toolMsgId }) {
+                        let stepCount = messages[toolIdx].toolSteps.count
+                        messages[toolIdx].toolStatus = .completed(
+                            summary: "\(stepCount) tool\(stepCount > 1 ? "s" : "") completed"
+                        )
+                        currentToolMessageId = nil
+                    }
                     updateWorkStatus { status in
                         if status.stage != .error {
                             status.stage = .answering
@@ -433,6 +559,56 @@ final class ChatService: ObservableObject {
         // Add to conversation history (keep original with suggestions for context)
         if !responseText.isEmpty {
             conversationHistory.append((role: "assistant", content: responseText))
+        }
+
+        // Persist assistant message
+        if let convId = currentConversationId, let id = responseMessageId {
+            let assistantMsg = ChatMessage(id: id, role: .assistant, content: cleanedText)
+            storage.saveMessage(conversationId: convId, message: assistantMsg)
+            storage.updateConversationTimestamp(id: convId)
+
+            // Auto-generate title via LLM after the first AI reply
+            let userMessages = messages.filter { $0.role == .user }
+            let assistantMessages = messages.filter { $0.role == .assistant }
+            if userMessages.count == 1, assistantMessages.count == 1 {
+                generateTitleAsync(
+                    convId: convId,
+                    userMessage: userMessages[0].content,
+                    assistantReply: cleanedText
+                )
+            }
+
+            conversations = storage.fetchConversations()
+        }
+    }
+
+    /// Ask LLM to generate a concise conversation title in the background
+    private func generateTitleAsync(convId: UUID, userMessage: String, assistantReply: String) {
+        Task { @MainActor in
+            let prompt = """
+            Based on this conversation, generate a very short title (max 20 characters, in the same language as the user). Just the title, nothing else.
+
+            User: \(userMessage.prefix(200))
+            Assistant: \(assistantReply.prefix(300))
+
+            Title:
+            """
+
+            do {
+                let title = try await LLMService.shared.generateText(prompt: prompt)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: #"\"'\u{201C}\u{201D}"#))
+
+                guard !title.isEmpty, title.count <= 40 else { return }
+                // Only update if this conversation is still active
+                guard currentConversationId == convId else { return }
+
+                currentConversationTitle = title
+                storage.updateTitle(id: convId, title: title)
+                conversations = storage.fetchConversations()
+            } catch {
+                print("[ChatService] Title generation failed: \(error)")
+            }
         }
     }
 

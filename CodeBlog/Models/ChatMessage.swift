@@ -11,9 +11,18 @@ import Foundation
 struct ChatMessage: Identifiable, Sendable {
     let id: UUID
     let role: Role
-    let content: String
+    var content: String
     let timestamp: Date
     var toolStatus: ToolStatus?
+    var toolSteps: [ToolStep]
+
+    /// A single step within a tool call sequence
+    struct ToolStep: Identifiable, Sendable, Equatable {
+        let id: UUID
+        let name: String
+        let description: String
+        var status: ToolStatus
+    }
 
     /// The role/type of message
     enum Role: Sendable {
@@ -34,13 +43,15 @@ struct ChatMessage: Identifiable, Sendable {
         role: Role,
         content: String,
         timestamp: Date = Date(),
-        toolStatus: ToolStatus? = nil
+        toolStatus: ToolStatus? = nil,
+        toolSteps: [ToolStep] = []
     ) {
         self.id = id
         self.role = role
         self.content = content
         self.timestamp = timestamp
         self.toolStatus = toolStatus
+        self.toolSteps = toolSteps
     }
 
     // MARK: - Convenience Initializers
@@ -55,12 +66,14 @@ struct ChatMessage: Identifiable, Sendable {
         ChatMessage(role: .assistant, content: content)
     }
 
-    /// Create a running tool call message
+    /// Create a running tool call message with an initial step
     static func toolCall(_ toolName: String, description: String) -> ChatMessage {
-        ChatMessage(
+        let stepId = UUID()
+        return ChatMessage(
             role: .toolCall,
             content: description,
-            toolStatus: .running
+            toolStatus: .running,
+            toolSteps: [ToolStep(id: stepId, name: toolName, description: description, status: .running)]
         )
     }
 }
