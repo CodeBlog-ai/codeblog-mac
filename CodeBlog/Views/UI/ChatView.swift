@@ -855,8 +855,10 @@ struct ChatView: View {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(chatService.conversations) { conv in
                             historyRow(conv: conv)
+                                .transition(.opacity.combined(with: .move(edge: .trailing)))
                         }
                     }
+                    .animation(.easeOut(duration: 0.25), value: chatService.conversations.map(\.id))
                 }
                 .frame(maxHeight: 300)
             }
@@ -868,42 +870,12 @@ struct ChatView: View {
     private func historyRow(conv: ChatConversation) -> some View {
         let isActive = chatService.currentConversationId == conv.id
 
-        return Button(action: {
+        return HistoryRowView(conv: conv, isActive: isActive) {
             chatService.loadConversation(id: conv.id)
             showHistoryPopover = false
-        }) {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(conv.title)
-                        .font(.custom("Nunito", size: 12).weight(isActive ? .bold : .medium))
-                        .foregroundColor(isActive ? Color(hex: "F96E00") : Color(hex: "4A4A4A"))
-                        .lineLimit(1)
-
-                    Text(relativeTimeString(conv.updatedAt))
-                        .font(.custom("Nunito", size: 10).weight(.regular))
-                        .foregroundColor(Color(hex: "BBBBBB"))
-                }
-
-                Spacer()
-
-                if isActive {
-                    Circle()
-                        .fill(Color(hex: "F96E00"))
-                        .frame(width: 6, height: 6)
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(isActive ? Color(hex: "FFF4E9") : Color.clear)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .pointingHandCursor()
-        .contextMenu {
-            Button(role: .destructive) {
+        } onDelete: {
+            withAnimation(.easeOut(duration: 0.25)) {
                 chatService.deleteConversation(id: conv.id)
-            } label: {
-                Label("Delete", systemImage: "trash")
             }
         }
     }
@@ -2902,4 +2874,74 @@ private struct ThinkingIndicator: View {
     ThinkingIndicator()
         .padding()
         .background(Color(hex: "FFFAF5"))
+}
+
+// MARK: - History Row View
+
+private struct HistoryRowView: View {
+    let conv: ChatConversation
+    let isActive: Bool
+    let onSelect: () -> Void
+    let onDelete: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(conv.title)
+                        .font(.custom("Nunito", size: 12).weight(isActive ? .bold : .medium))
+                        .foregroundColor(isActive ? Color(hex: "F96E00") : Color(hex: "4A4A4A"))
+                        .lineLimit(1)
+
+                    Text(relativeTimeString(conv.updatedAt))
+                        .font(.custom("Nunito", size: 10).weight(.regular))
+                        .foregroundColor(Color(hex: "BBBBBB"))
+                }
+
+                Spacer()
+
+                ZStack {
+                    if isActive && !isHovered {
+                        Circle()
+                            .fill(Color(hex: "F96E00"))
+                            .frame(width: 6, height: 6)
+                    }
+                    Button(action: onDelete) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 11, weight: .regular))
+                            .foregroundColor(Color(hex: "BBBBBB"))
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                    .opacity(isHovered ? 1 : 0)
+                    .allowsHitTesting(isHovered)
+                }
+                .frame(width: 22, height: 22)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(isActive ? Color(hex: "FFF4E9") : Color.clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
+        .onHover { hovering in
+            isHovered = hovering
+        }
+    }
+
+    private func relativeTimeString(_ date: Date) -> String {
+        let interval = Date().timeIntervalSince(date)
+        if interval < 60 { return "Just now" }
+        if interval < 3600 { return "\(Int(interval / 60))m ago" }
+        if interval < 86400 { return "\(Int(interval / 3600))h ago" }
+        if interval < 604800 { return "\(Int(interval / 86400))d ago" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d"
+        return formatter.string(from: date)
+    }
 }
