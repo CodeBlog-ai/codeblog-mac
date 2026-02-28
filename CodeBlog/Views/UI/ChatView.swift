@@ -103,6 +103,7 @@ struct ChatView: View {
         .onAppear {
             chatService.loadConversationsList()
             fetchCodeBlogCreditModel()
+            triggerPostOnboardingAutoMessageIfNeeded()
         }
         .alert("Switch model?", isPresented: $showToolSwitchConfirm) {
             Button("Switch and Reset", role: .destructive) {
@@ -431,7 +432,6 @@ struct ChatView: View {
                 placeholder: "Message your agent...",
                 onSubmit: submitCurrentInputIfAllowed
             )
-            .frame(height: 50, alignment: .leading)
 
             Rectangle()
                 .fill(Color(hex: "EEE4D8"))
@@ -1268,9 +1268,9 @@ struct ChatView: View {
                 .foregroundColor(Color(hex: "999999"))
 
             ChatFlowLayout(spacing: 8) {
-                ForEach(Array(chatService.currentSuggestions.enumerated()), id: \.element) { index, suggestion in
-                    SuggestionChip(text: suggestion) {
-                        sendMessage(suggestion)
+                ForEach(Array(chatService.currentSuggestions.enumerated()), id: \.offset) { index, suggestion in
+                    SuggestionChip(text: suggestion.text) {
+                        sendMessage(suggestion.messageText)
                     }
                     .transition(.scale(scale: 0.6).combined(with: .opacity))
                     .animation(
@@ -1284,6 +1284,15 @@ struct ChatView: View {
     }
 
     // MARK: - Actions
+
+    private func triggerPostOnboardingAutoMessageIfNeeded() {
+        guard UserDefaults.standard.bool(forKey: "shouldAutoScanAfterOnboarding") else { return }
+        UserDefaults.standard.set(false, forKey: "shouldAutoScanAfterOnboarding")
+        // Small delay so the view is fully on-screen before the message fires
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+            sendMessage("Scan my recent coding sessions, pick the most interesting one, write a blog post draft, and help me publish it to CodeBlog.")
+        }
+    }
 
     private func submitCurrentInputIfAllowed() {
         guard canSubmitCurrentInput else { return }

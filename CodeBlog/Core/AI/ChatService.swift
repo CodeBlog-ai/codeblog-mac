@@ -98,6 +98,27 @@ struct ChatWorkStatus: Sendable, Equatable {
     }
 }
 
+/// A follow-up suggestion that may carry context data for the AI
+struct ChatSuggestion: Identifiable, Equatable {
+    let id = UUID()
+    /// Display text shown to the user
+    let text: String
+    /// Optional context injected into the message sent to the AI.
+    /// Use this to pass IDs or other data that the AI needs but won't have from just the display text.
+    let contextHint: String?
+
+    init(_ text: String, contextHint: String? = nil) {
+        self.text = text
+        self.contextHint = contextHint
+    }
+
+    /// Full message to send to the AI — includes context hint if present
+    var messageText: String {
+        guard let hint = contextHint, !hint.isEmpty else { return text }
+        return "\(text)\n\n[Context: \(hint)]"
+    }
+}
+
 /// Orchestrates chat conversations with tool-calling support
 @MainActor
 final class ChatService: ObservableObject {
@@ -114,7 +135,7 @@ final class ChatService: ObservableObject {
     @Published private(set) var error: String?
     @Published private(set) var debugLog: [ChatDebugEntry] = []
     @Published private(set) var workStatus: ChatWorkStatus?
-    @Published private(set) var currentSuggestions: [String] = []
+    @Published private(set) var currentSuggestions: [ChatSuggestion] = []
     @Published var showDebugPanel = false
     @Published private(set) var currentConversationId: UUID?
     @Published private(set) var currentConversationTitle: String = "New Chat"
@@ -724,6 +745,7 @@ final class ChatService: ObservableObject {
         - If a tool call fails with "file not found", the path is wrong — check the scan results again
         - Never mention MCP, tool configuration, API keys, or setup details to the user. Just use the tools naturally.
         - If a tool call fails, try again or suggest an alternative action — do NOT tell the user to install or configure anything.
+        - If you need a post_id but don't have one, call browse_posts or search_posts first to find it — NEVER call read_post, comment_on_post, vote_on_post, edit_post, or delete_post with a made-up ID.
 
         ## ERROR HANDLING (CRITICAL)
 
@@ -798,6 +820,12 @@ final class ChatService: ObservableObject {
         ```
 
         Keep questions short (<50 chars), start with verbs like "Scan", "Write", "Show", "Create", "What's".
+
+        CRITICAL RULES for suggestions:
+        - ONLY suggest things you can answer from scratch, without needing specific IDs or data from this conversation
+        - NEVER suggest actions like "Read post X", "Open session Y", "View that post" — these require specific IDs you won't have
+        - GOOD: "Show trending posts this week", "Scan my recent sessions", "What's popular in Swift?"
+        - BAD: "Read that post", "Look at the OpenClaw article", "Analyze that session" (requires specific ID/path)
         """
     }
 
@@ -897,17 +925,35 @@ final class ChatService: ObservableObject {
         }
         output += """
 
-        When the user asks about coding sessions, use scan_sessions first.
-        For read_session and analyze_session, you MUST provide both 'path' and 'source' parameters from the scan_sessions result.
-        
-        PUBLISHING WORKFLOW:
-        1. To generate a preview: call preview_post with mode='manual' (provide title+content) or mode='auto' (auto-generate)
-           - The 'mode' parameter is REQUIRED for preview_post. NEVER call preview_post with empty arguments.
-        2. After showing preview to user and they say "publish" or "发布": call confirm_post with the preview_id
-           - Do NOT call preview_post again — use confirm_post directly with the existing preview_id
-        3. If preview expired: regenerate with preview_post (mode='manual' or 'auto'), then confirm_post
-        
-        Always confirm with the user before publishing.
+        ## TOOL WORKFLOWS — REQUIRED CALLING ORDER
+
+        Many tools require data from a previous tool call. NEVER call these tools with guessed or made-up IDs.
+
+        ### Session Workflow
+        - ALWAYS call scan_sessions first → get path + source from its results
+        - read_session(path, source) and analyze_session(path, source): BOTH parameters come from scan_sessions result
+        - Never invent a file path — use the exact path returned by scan_sessions
+
+        ### Forum / Post Workflow
+        - To read, comment, vote, edit, delete, or bookmark a specific post:
+          → First call browse_posts or search_posts to get the post_id
+          → Then call read_post(post_id), comment_on_post(post_id, ...), vote_on_post(post_id, ...), etc.
+        - NEVER call read_post, comment_on_post, vote_on_post, edit_post, delete_post with a guessed post_id
+        - Exception: if the user explicitly provides a post_id or URL, extract it from there
+
+        ### Publishing Workflow
+        1. Call preview_post(mode='manual'|'auto'|'digest', ...) → get preview_id from result
+           - 'mode' is REQUIRED. NEVER call preview_post with empty arguments.
+        2. Show the full preview to user, ask for confirmation
+        3. User says "publish" → call confirm_post(preview_id) with the preview_id from step 1
+           - Do NOT call preview_post again before confirm_post unless the preview expired
+        4. If preview expired: call preview_post again to get a new preview_id, then confirm_post
+
+        ### Daily Report Workflow
+        - Call collect_daily_stats first → then save_daily_report with those results
+        - Never call save_daily_report without first collecting stats
+
+        Always confirm with the user before any destructive action (delete_post, publish).
         """
         return output
     }
@@ -916,20 +962,27 @@ final class ChatService: ObservableObject {
         """
         ## TOOLS
 
-        Use MCP tools to scan sessions, analyze content, and post to CodeBlog.
-        Prefer scan_sessions -> read_session/analyze_session as your default workflow.
-        
-        IMPORTANT: For read_session and analyze_session, you MUST provide both 'path' and 'source' parameters.
-        - path: The full file path returned by scan_sessions (e.g., "/Users/.../session.jsonl")
-        - source: The source type returned by scan_sessions (e.g., "claude-code", "cursor", "codex")
-        Never call these tools with empty arguments.
-        
-        PUBLISHING WORKFLOW:
-        1. preview_post requires 'mode' parameter: 'manual', 'auto', or 'digest'. NEVER call with empty arguments.
-        2. When user says "publish" after seeing a preview, call confirm_post with the preview_id — do NOT call preview_post again.
-        3. If preview expired, regenerate with preview_post (with mode parameter), then confirm_post.
-        
-        Always show complete preview before publish-related actions.
+        Use MCP tools to help the user with everything on CodeBlog.
+
+        ## TOOL WORKFLOWS — REQUIRED CALLING ORDER
+
+        ### Session Workflow
+        - scan_sessions first → get path + source → then read_session(path, source) or analyze_session(path, source)
+        - NEVER invent file paths. Always use exact path from scan_sessions.
+
+        ### Forum / Post Workflow
+        - To read/comment/vote/edit/delete a post: call browse_posts or search_posts first to get post_id
+        - NEVER call read_post, comment_on_post, vote_on_post, edit_post, delete_post with a guessed post_id
+
+        ### Publishing Workflow
+        1. preview_post(mode='manual'|'auto'|'digest') → get preview_id
+        2. Show full preview to user
+        3. confirm_post(preview_id) to publish — do NOT call preview_post again
+
+        ### Daily Report Workflow
+        - collect_daily_stats first → then save_daily_report
+
+        Always confirm with the user before publishing or deleting.
         """
     }
 
@@ -991,11 +1044,30 @@ final class ChatService: ObservableObject {
         if lowered.contains("preview_post") { return "Previewing post" }
         if lowered.contains("confirm_post") { return "Publishing post" }
         if lowered.contains("create_draft") { return "Creating draft" }
+        if lowered.contains("post_to_codeblog") { return "Posting to CodeBlog" }
+        if lowered.contains("weekly_digest") { return "Generating digest" }
         if lowered.contains("browse_posts") { return "Browsing posts" }
+        if lowered.contains("search_posts") { return "Searching posts" }
         if lowered.contains("read_post") { return "Reading post" }
-        if lowered.contains("collect_daily_stats") { return "Collecting stats" }
+        if lowered.contains("comment_on_post") { return "Commenting" }
+        if lowered.contains("vote_on_post") { return "Voting" }
+        if lowered.contains("edit_post") { return "Editing post" }
+        if lowered.contains("delete_post") { return "Deleting post" }
+        if lowered.contains("bookmark_post") { return "Managing bookmarks" }
+        if lowered.contains("browse_by_tag") { return "Browsing by tag" }
+        if lowered.contains("trending_topics") { return "Trending topics" }
+        if lowered.contains("explore_and_engage") { return "Exploring posts" }
+        if lowered.contains("join_debate") { return "Joining debate" }
+        if lowered.contains("follow_agent") { return "Managing follows" }
         if lowered.contains("manage_agents") { return "Managing agents" }
+        if lowered.contains("my_posts") { return "My posts" }
+        if lowered.contains("my_dashboard") { return "My dashboard" }
+        if lowered.contains("my_notifications") { return "Notifications" }
+        if lowered.contains("codeblog_setup") { return "CodeBlog setup" }
+        if lowered.contains("codeblog_status") { return "Checking status" }
+        if lowered.contains("collect_daily_stats") { return "Collecting stats" }
         if lowered.contains("save_daily_report") { return "Saving daily report" }
+        if lowered.contains("configure_daily_report") { return "Daily report config" }
         // Fallback: use the command as-is (truncated)
         let display = command.count > 40 ? String(command.prefix(40)) + "…" : command
         return "Running: \(display)"
@@ -1011,91 +1083,111 @@ final class ChatService: ObservableObject {
         if lowered.contains("preview_post") { return "Generating post preview…" }
         if lowered.contains("confirm_post") { return "Publishing your post…" }
         if lowered.contains("create_draft") { return "Creating draft post…" }
+        if lowered.contains("post_to_codeblog") { return "Posting to CodeBlog…" }
+        if lowered.contains("weekly_digest") { return "Generating weekly digest…" }
         if lowered.contains("browse_posts") { return "Browsing forum posts…" }
-        if lowered.contains("read_post") { return "Reading post…" }
-        if lowered.contains("collect_daily_stats") { return "Collecting daily stats…" }
+        if lowered.contains("search_posts") { return "Searching posts…" }
+        if lowered.contains("read_post") { return "Reading post content…" }
+        if lowered.contains("comment_on_post") { return "Posting comment…" }
+        if lowered.contains("vote_on_post") { return "Voting on post…" }
+        if lowered.contains("edit_post") { return "Editing post…" }
+        if lowered.contains("delete_post") { return "Deleting post…" }
+        if lowered.contains("bookmark_post") { return "Managing bookmarks…" }
+        if lowered.contains("browse_by_tag") { return "Browsing posts by tag…" }
+        if lowered.contains("trending_topics") { return "Fetching trending topics…" }
+        if lowered.contains("explore_and_engage") { return "Exploring the forum…" }
+        if lowered.contains("join_debate") { return "Joining debate…" }
+        if lowered.contains("follow_agent") { return "Managing follows…" }
         if lowered.contains("manage_agents") { return "Managing agents…" }
+        if lowered.contains("my_posts") { return "Loading your posts…" }
+        if lowered.contains("my_dashboard") { return "Loading your dashboard…" }
+        if lowered.contains("my_notifications") { return "Loading notifications…" }
+        if lowered.contains("codeblog_setup") { return "Setting up CodeBlog…" }
+        if lowered.contains("codeblog_status") { return "Checking service status…" }
+        if lowered.contains("collect_daily_stats") { return "Collecting daily stats…" }
+        if lowered.contains("save_daily_report") { return "Saving daily report…" }
+        if lowered.contains("configure_daily_report") { return "Configuring daily report…" }
         return "Running tool…"
     }
 
-    /// Summary shown when a tool completes
+    /// Summary shown when a tool completes — user-facing, no technical details
     private func toolResultSummary(output: String, exitCode: Int?) -> String {
         if let exitCode, exitCode != 0 {
-            return "Failed (exit \(exitCode))"
+            return "Something went wrong"
         }
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            return "Completed"
+            return "Done"
         }
         let lines = trimmed.split(whereSeparator: \.isNewline).count
         if lines == 1 {
-            return String(trimmed.prefix(80))
+            // Single-line result: show it only if it looks user-friendly (short, no JSON/code)
+            let isClean = trimmed.count <= 60
+                && !trimmed.hasPrefix("{")
+                && !trimmed.hasPrefix("[")
+                && !trimmed.contains("\":")
+            return isClean ? trimmed : "Done"
         }
-        return "Completed (\(lines) results)"
+        return "\(lines) results"
     }
 
-    /// Build a concise tool history entry for conversation context
-    /// Extracts key information like preview_id, post URLs, etc.
+    /// Build a concise tool history entry for conversation context.
+    /// For tools that return IDs the AI needs later (browse_posts, scan_sessions, preview_post),
+    /// we keep the full result so the AI can use those IDs in follow-up tool calls.
     private func buildToolHistoryEntry(toolName: String, result: String, isError: Bool, exitCode: Int?) -> String {
         var entry = "[Tool: \(toolName)]"
-        
+
         if isError || (exitCode ?? 0) != 0 {
-            // For errors, include the error message (truncated)
-            let errorPreview = String(result.prefix(200))
+            let errorPreview = String(result.prefix(300))
             entry += " ERROR: \(errorPreview)"
             return entry
         }
-        
-        // Extract key information based on tool type
+
         switch toolName {
         case "preview_post":
-            // Extract preview_id - this is critical for confirm_post
-            if let previewIdMatch = result.range(of: "pv_[a-zA-Z0-9_]+", options: .regularExpression) {
+            // Must keep preview_id so AI can pass it to confirm_post
+            if let previewIdMatch = result.range(of: #"pv_[a-zA-Z0-9_]+"#, options: .regularExpression) {
                 let previewId = String(result[previewIdMatch])
-                entry += " preview_id=\(previewId)"
+                entry += " preview_id=\(previewId) (use this exact ID with confirm_post to publish)"
+            } else {
+                entry += " Preview generated. Find preview_id in the full result."
             }
-            // Extract title if present
-            if let titleRange = result.range(of: "\\*\\*Title:\\*\\* (.+)", options: .regularExpression),
-               let titleMatch = result[titleRange].split(separator: "**").last {
-                entry += " title=\"\(String(titleMatch).prefix(50))\""
-            }
-            entry += " (Preview generated successfully. Use confirm_post with the preview_id to publish.)"
-            
+
         case "confirm_post":
-            // Extract post URL if present
-            if let urlMatch = result.range(of: "https://codeblog\\.ai/[^\\s]+", options: .regularExpression) {
-                let url = String(result[urlMatch])
-                entry += " Published: \(url)"
+            if let urlMatch = result.range(of: #"https://codeblog\.ai/\S+"#, options: .regularExpression) {
+                entry += " Published at: \(String(result[urlMatch]))"
             } else {
-                entry += " Published successfully"
+                entry += " Published successfully."
             }
-            
+
+        case "browse_posts", "search_posts", "my_posts":
+            // Keep full result — AI needs post_id values to call read_post, comment_on_post, etc.
+            entry += " RESULT (use post_id values for follow-up tools):\n\(String(result.prefix(1500)))"
+
         case "scan_sessions":
-            // Count sessions found
-            let sessionCount = result.components(separatedBy: "\"id\":").count - 1
-            entry += " Found \(sessionCount) session(s)"
-            
-        case "analyze_session", "read_session":
-            // Just note it completed
-            entry += " Completed"
-            
+            // Keep full result — AI needs path + source to call read_session / analyze_session
+            entry += " RESULT (use path+source for read_session/analyze_session):\n\(String(result.prefix(1500)))"
+
+        case "read_session", "analyze_session":
+            entry += " Completed (\(result.split(whereSeparator: \.isNewline).count) lines)"
+
         default:
-            // For other tools, include a brief summary
-            let lines = result.split(whereSeparator: \.isNewline).count
-            if lines <= 3 {
-                entry += " \(String(result.prefix(150)))"
+            let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lines = trimmed.split(whereSeparator: \.isNewline).count
+            if lines <= 5 {
+                entry += " \(String(trimmed.prefix(300)))"
             } else {
-                entry += " (\(lines) lines of output)"
+                entry += " (\(lines) lines): \(String(trimmed.prefix(200)))"
             }
         }
-        
+
         return entry
     }
 
     // MARK: - Suggestions Parsing
 
     /// Parse suggestions block from response and return cleaned text + suggestions array
-    private func parseSuggestions(from text: String) -> (cleanedText: String, suggestions: [String]) {
+    private func parseSuggestions(from text: String) -> (cleanedText: String, suggestions: [ChatSuggestion]) {
         // Look for ```suggestions ... ``` block (with optional "Suggestions:" label before it)
         // Pattern captures: optional label + the code block with JSON array inside
         let pattern = "(?:Suggestions:\\s*)?```suggestions\\s*\\n([\\s\\S]*?)\\n?```"
@@ -1111,7 +1203,7 @@ final class ChatService: ObservableObject {
 
         let jsonString = String(text[jsonRange]).trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Parse JSON array
+        // Parse JSON array of strings
         guard let data = jsonString.data(using: .utf8),
               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String] else {
             print("[ChatService] Failed to parse suggestions JSON: \(jsonString)")
@@ -1126,8 +1218,9 @@ final class ChatService: ObservableObject {
             withTemplate: ""
         ).trimmingCharacters(in: .whitespacesAndNewlines)
 
-        print("[ChatService] Parsed \(parsed.count) suggestions")
-        return (cleanedText, parsed)
+        let suggestions = parsed.map { ChatSuggestion($0) }
+        print("[ChatService] Parsed \(suggestions.count) suggestions")
+        return (cleanedText, suggestions)
     }
 }
 

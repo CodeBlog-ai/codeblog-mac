@@ -2,13 +2,17 @@
 //  ChatInputField.swift
 //  CodeBlog
 //
-//  AppKit-backed single-line text field for the chat composer.
+//  AppKit-backed multi-line composer using NSTextView.
+//  - Enter       → send
+//  - Shift+Enter → newline
+//  - Cmd+Enter / Ctrl+Enter → send
+//  - Height grows with content (min 50pt, max 160pt, then scrolls)
 //
 
 import SwiftUI
 import AppKit
 
-// MARK: - AppKit Composer Text Field (SwiftUI Wrapper)
+// MARK: - SwiftUI Wrapper
 
 struct AppKitComposerTextField: NSViewRepresentable {
     @Binding var text: String
@@ -17,214 +21,201 @@ struct AppKitComposerTextField: NSViewRepresentable {
     let placeholder: String
     let onSubmit: () -> Void
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
+    static let minHeight: CGFloat = 50
+    static let maxHeight: CGFloat = 160
+
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
+
+    func makeNSView(context: Context) -> ComposerTextView {
+        let tv = ComposerTextView()
+        tv.delegate        = context.coordinator
+        tv.isEditable      = true
+        tv.isSelectable    = true
+        tv.isRichText      = false
+        tv.allowsUndo      = true
+        tv.drawsBackground = false
+        tv.focusRingType   = .none
+
+        tv.textContainerInset  = NSSize(width: 14, height: 15)
+        tv.textContainer?.widthTracksTextView  = true
+        tv.textContainer?.containerSize        = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                                        height: CGFloat.greatestFiniteMagnitude)
+        tv.isVerticallyResizable   = true
+        tv.isHorizontallyResizable = false
+
+        let font = NSFont(name: "Nunito-Medium", size: 16)
+                    ?? NSFont.systemFont(ofSize: 16, weight: .medium)
+        tv.font      = font
+        tv.textColor = NSColor(hex: "2F2A24") ?? .labelColor
+
+        tv.placeholderText  = placeholder
+        tv.placeholderColor = NSColor(hex: "9B948D") ?? .secondaryLabelColor
+        tv.string           = text
+        tv.onSubmit         = onSubmit
+
+        // Wrap in a scroll view that NSTextView needs for scrolling
+        // but we control the outer frame via sizeThatFits
+        tv.enclosingScrollView?.hasVerticalScroller  = true
+        tv.enclosingScrollView?.autohidesScrollers   = true
+        tv.enclosingScrollView?.drawsBackground      = false
+
+        context.coordinator.textView = tv
+        return tv
     }
 
-    func makeNSView(context: Context) -> ComposerTextField {
-        let textField = ComposerTextField()
-        textField.delegate = context.coordinator
-        textField.stringValue = text
-        textField.font = NSFont(name: "Nunito-Medium", size: 16) ?? NSFont.systemFont(ofSize: 16, weight: .medium)
-        textField.textColor = NSColor(hex: "2F2A24") ?? .labelColor
-        textField.alignment = .left
-        textField.lineBreakMode = .byTruncatingTail
-        textField.maximumNumberOfLines = 1
-        textField.usesSingleLineMode = true
-        textField.focusRingType = .none
-        textField.isBordered = false
-        textField.isBezeled = false
-        textField.drawsBackground = false
-        textField.isEditable = true
-        textField.isSelectable = true
-        textField.translatesAutoresizingMaskIntoConstraints = false
-        textField.configurePlaceholder(
-            placeholder,
-            font: NSFont(name: "Nunito-Medium", size: 16) ?? NSFont.systemFont(ofSize: 16, weight: .medium),
-            color: NSColor(hex: "9B948D") ?? .secondaryLabelColor
-        )
-        return textField
-    }
-
-    func updateNSView(_ nsView: ComposerTextField, context: Context) {
+    func updateNSView(_ tv: ComposerTextView, context: Context) {
         context.coordinator.parent = self
+        tv.onSubmit = onSubmit
 
-        if nsView.stringValue != text {
-            // Terminate any active IME composition (e.g. Chinese input) before clearing
-            if text.isEmpty {
-                nsView.abortEditing()
-            }
-            nsView.stringValue = text
+        // Sync text only when changed externally (e.g. cleared after send)
+        if tv.string != text {
+            tv.string = text
+            tv.refreshPlaceholder()
+            tv.invalidateIntrinsicContentSize()
         }
-        nsView.refreshPlaceholderVisibility()
 
+        // Focus token
         if context.coordinator.lastFocusToken != focusToken {
             context.coordinator.lastFocusToken = focusToken
-            DispatchQueue.main.async {
-                nsView.window?.makeFirstResponder(nsView)
-            }
+            DispatchQueue.main.async { tv.window?.makeFirstResponder(tv) }
         }
-
-        if isFocused, nsView.window?.firstResponder !== nsView.currentEditor() {
-            DispatchQueue.main.async {
-                nsView.window?.makeFirstResponder(nsView)
-            }
+        if isFocused && tv.window?.firstResponder !== tv {
+            DispatchQueue.main.async { tv.window?.makeFirstResponder(tv) }
         }
     }
 
-    final class Coordinator: NSObject, NSTextFieldDelegate {
+    /// Let SwiftUI ask for the preferred size — this drives .frame height automatically.
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView tv: ComposerTextView, context: Context) -> CGSize? {
+        let width = proposal.width ?? 300
+        let h = tv.idealHeight(forWidth: width)
+            .clamped(to: Self.minHeight...Self.maxHeight)
+        return CGSize(width: width, height: h)
+    }
+
+    // MARK: - Coordinator
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: AppKitComposerTextField
-        var lastFocusToken: Int = -1
+        var lastFocusToken = -1
+        weak var textView: ComposerTextView?
 
-        init(parent: AppKitComposerTextField) {
-            self.parent = parent
+        init(parent: AppKitComposerTextField) { self.parent = parent }
+
+        func textDidBeginEditing(_ n: Notification) { parent.isFocused = true  }
+        func textDidEndEditing  (_ n: Notification) { parent.isFocused = false }
+
+        func textDidChange(_ n: Notification) {
+            guard let tv = n.object as? ComposerTextView else { return }
+            parent.text = tv.string
+            tv.refreshPlaceholder()
+            tv.invalidateIntrinsicContentSize()
         }
 
-        func controlTextDidBeginEditing(_ obj: Notification) {
-            parent.isFocused = true
-        }
-
-        func controlTextDidEndEditing(_ obj: Notification) {
-            parent.isFocused = false
-        }
-
-        func controlTextDidChange(_ obj: Notification) {
-            guard let field = obj.object as? NSTextField else { return }
-            parent.text = field.stringValue
-            (field as? ComposerTextField)?.refreshPlaceholderVisibility()
-        }
-
-        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-                parent.onSubmit()
+        func textView(_ textView: NSTextView, doCommandBy sel: Selector) -> Bool {
+            guard sel == #selector(NSResponder.insertNewline(_:)) else { return false }
+            let flags = NSApp.currentEvent?.modifierFlags ?? []
+            if flags.contains(.shift) {
+                // Shift+Enter → real newline
+                textView.insertNewlineIgnoringFieldEditor(nil)
                 return true
             }
-            return false
+            // Plain Enter → send (Cmd+Enter is caught in keyDown below)
+            parent.onSubmit()
+            return true
         }
     }
 }
 
-// MARK: - Composer Text Field (NSTextField subclass)
+// MARK: - ComposerTextView
 
-final class ComposerTextField: NSTextField {
-    private let placeholderLabel = NSTextField(labelWithString: "")
+final class ComposerTextView: NSTextView {
 
-    var composerCell: ComposerTextFieldCell? {
-        cell as? ComposerTextFieldCell
-    }
+    /// Called when Cmd+Enter / Ctrl+Enter is pressed
+    var onSubmit: (() -> Void)?
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        cell = ComposerTextFieldCell(textCell: "")
-        composerCell?.horizontalInset = 14
-        composerCell?.verticalInset = 0
-        configurePlaceholderLabel()
-    }
+    // MARK: Placeholder
 
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        cell = ComposerTextFieldCell(textCell: "")
-        composerCell?.horizontalInset = 14
-        composerCell?.verticalInset = 0
-        configurePlaceholderLabel()
-    }
+    var placeholderText: String = "" { didSet { refreshPlaceholder() } }
+    var placeholderColor: NSColor = .secondaryLabelColor { didSet { refreshPlaceholder() } }
 
-    override var stringValue: String {
-        didSet {
-            refreshPlaceholderVisibility()
-        }
+    private lazy var placeholderLabel: NSTextField = {
+        let f = NSTextField(labelWithString: "")
+        f.isEditable    = false
+        f.isSelectable  = false
+        f.isBordered    = false
+        f.drawsBackground = false
+        f.lineBreakMode = .byTruncatingTail
+        f.maximumNumberOfLines = 1
+        addSubview(f)
+        return f
+    }()
+
+    func refreshPlaceholder() {
+        placeholderLabel.stringValue = placeholderText
+        placeholderLabel.font        = font
+        placeholderLabel.textColor   = placeholderColor
+        placeholderLabel.isHidden    = !string.isEmpty
+        needsLayout = true
     }
 
     override func layout() {
         super.layout()
-        guard let cell = composerCell else { return }
-        placeholderLabel.frame = cell.titleRect(forBounds: bounds)
+        // Mirror NSTextView's text inset so placeholder aligns with real text
+        let inset  = textContainerInset
+        let pad    = textContainer?.lineFragmentPadding ?? 5
+        let x      = inset.width + pad
+        let fh     = (font?.ascender ?? 14) - (font?.descender ?? -4)
+        // NSTextView is flipped; origin.y is from the top
+        placeholderLabel.frame = NSRect(x: x, y: inset.height,
+                                        width: max(0, bounds.width - x - inset.width),
+                                        height: fh + 2)
     }
 
-    func configurePlaceholder(_ text: String, font: NSFont, color: NSColor) {
-        placeholderLabel.stringValue = text
-        placeholderLabel.font = font
-        placeholderLabel.textColor = color
-        refreshPlaceholderVisibility()
-        needsLayout = true
-    }
+    // MARK: Intrinsic size (drives sizeThatFits)
 
-    func refreshPlaceholderVisibility() {
-        // During editing, the text lives in the field editor, not stringValue
-        let currentText: String
-        if let editor = currentEditor() as? NSTextView {
-            currentText = editor.string
-        } else {
-            currentText = stringValue
+    override var intrinsicContentSize: NSSize {
+        guard let lm = layoutManager, let tc = textContainer else {
+            return NSSize(width: NSView.noIntrinsicMetric, height: AppKitComposerTextField.minHeight)
         }
-        placeholderLabel.isHidden = !currentText.isEmpty
+        lm.ensureLayout(for: tc)
+        let used   = lm.usedRect(for: tc).height
+        let insets = textContainerInset.height * 2
+        let h = (used + insets)
+            .clamped(to: AppKitComposerTextField.minHeight...AppKitComposerTextField.maxHeight)
+        return NSSize(width: NSView.noIntrinsicMetric, height: h)
     }
 
-    private func configurePlaceholderLabel() {
-        placeholderLabel.isEditable = false
-        placeholderLabel.isSelectable = false
-        placeholderLabel.isBordered = false
-        placeholderLabel.drawsBackground = false
-        placeholderLabel.lineBreakMode = .byTruncatingTail
-        placeholderLabel.maximumNumberOfLines = 1
-        addSubview(placeholderLabel)
+    /// Height needed to display all text at a given width.
+    func idealHeight(forWidth width: CGFloat) -> CGFloat {
+        guard let lm = layoutManager, let tc = textContainer else {
+            return AppKitComposerTextField.minHeight
+        }
+        let saved = tc.containerSize
+        tc.containerSize = NSSize(width: width - textContainerInset.width * 2,
+                                  height: CGFloat.greatestFiniteMagnitude)
+        lm.ensureLayout(for: tc)
+        let h = lm.usedRect(for: tc).height + textContainerInset.height * 2
+        tc.containerSize = saved
+        return h
     }
+
+    // MARK: Keyboard
+
+    override func keyDown(with event: NSEvent) {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let isEnter = event.keyCode == 36 || event.keyCode == 76 // Return / numpad Enter
+        if isEnter && (flags == .command || flags == .control) {
+            onSubmit?()
+            return
+        }
+        super.keyDown(with: event)
+    }
+
+    override var acceptsFirstResponder: Bool { true }
 }
 
-// MARK: - Composer Text Field Cell
+// MARK: - Helpers
 
-final class ComposerTextFieldCell: NSTextFieldCell {
-    var horizontalInset: CGFloat = 14
-    var verticalInset: CGFloat = 0
-
-    override func drawingRect(forBounds rect: NSRect) -> NSRect {
-        centeredRect(forBounds: super.drawingRect(forBounds: rect))
-    }
-
-    override func titleRect(forBounds rect: NSRect) -> NSRect {
-        centeredRect(forBounds: super.titleRect(forBounds: rect))
-    }
-
-    override func edit(
-        withFrame aRect: NSRect,
-        in controlView: NSView,
-        editor textObj: NSText,
-        delegate: Any?,
-        event: NSEvent?
-    ) {
-        super.edit(
-            withFrame: titleRect(forBounds: aRect),
-            in: controlView,
-            editor: textObj,
-            delegate: delegate,
-            event: event
-        )
-    }
-
-    override func select(
-        withFrame aRect: NSRect,
-        in controlView: NSView,
-        editor textObj: NSText,
-        delegate: Any?,
-        start selStart: Int,
-        length selLength: Int
-    ) {
-        super.select(
-            withFrame: titleRect(forBounds: aRect),
-            in: controlView,
-            editor: textObj,
-            delegate: delegate,
-            start: selStart,
-            length: selLength
-        )
-    }
-
-    private func centeredRect(forBounds rect: NSRect) -> NSRect {
-        var insetRect = rect.insetBy(dx: horizontalInset, dy: verticalInset)
-        let textHeight = (font?.ascender ?? 10) - (font?.descender ?? -4) + (font?.leading ?? 0)
-        let yOffset = (insetRect.height - textHeight) / 2
-        insetRect.origin.y += max(0, yOffset.rounded(.down) - 0.5)
-        insetRect.size.height = textHeight
-        return insetRect.integral
-    }
+private extension Comparable {
+    func clamped(to r: ClosedRange<Self>) -> Self { min(max(self, r.lowerBound), r.upperBound) }
 }

@@ -106,36 +106,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Seed recording flag low, then create recorder so the first
         // transition to true will reliably start capture.
         AppState.shared.isRecording = false
-        recorder = ScreenRecorder(autoStart: true)
+        // DISABLED: Screen recording temporarily disabled
+        // recorder = ScreenRecorder(autoStart: true)
 
         // Only attempt to start recording after onboarding is fully completed.
         if didOnboard {
             // Onboarding complete - enable persistence and restore user preference
             AppState.shared.enablePersistence()
 
-            // Try to start recording, but handle permission failures gracefully
-            Task { [weak self] in
-                guard let self else { return }
-                do {
-                    // Check if we have permission by trying to access content
-                    _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-                    // Permission granted - restore saved preference or default to ON
-                    await MainActor.run {
-                        let savedPref = AppState.shared.getSavedPreference()
-                        AppState.shared.isRecording = savedPref ?? true
-                    }
-                    let finalState = await MainActor.run { AppState.shared.isRecording }
-                    AnalyticsService.shared.capture("recording_toggled", ["enabled": finalState, "reason": "auto"])
-                } catch {
-                    // No permission or error - don't start recording
-                    // User will need to grant permission in onboarding
-                    await MainActor.run {
-                        AppState.shared.isRecording = false
-                    }
-                    print("Screen recording permission not granted, skipping auto-start")
-                }
-                self.flushPendingDeepLinks()
-            }
+            // DISABLED: Screen recording permission check temporarily disabled
+            // Task { [weak self] in
+            //     guard let self else { return }
+            //     do {
+            //         _ = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            //         await MainActor.run {
+            //             let savedPref = AppState.shared.getSavedPreference()
+            //             AppState.shared.isRecording = savedPref ?? true
+            //         }
+            //         let finalState = await MainActor.run { AppState.shared.isRecording }
+            //         AnalyticsService.shared.capture("recording_toggled", ["enabled": finalState, "reason": "auto"])
+            //     } catch {
+            //         await MainActor.run { AppState.shared.isRecording = false }
+            //         print("Screen recording permission not granted, skipping auto-start")
+            //     }
+            //     self.flushPendingDeepLinks()
+            // }
+            flushPendingDeepLinks()
         } else {
             // Still in early onboarding, don't enable persistence yet
             // Keep recording off and don't persist this state

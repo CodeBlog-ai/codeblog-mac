@@ -100,6 +100,7 @@ actor MCPStdioClient {
     func disconnect() {
         readTask?.cancel()
         readTask = nil
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         process?.terminate()
         process = nil
         stdinPipe = nil
@@ -251,35 +252,37 @@ actor MCPStdioClient {
         guard let stdout = stdoutPipe?.fileHandleForReading else { return }
 
         readTask = Task { [weak self] in
-            var buffer = Data()
-            
-            while !Task.isCancelled {
-                do {
-                    let chunk = try stdout.availableData
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                var buffer = Data()
+
+                stdout.readabilityHandler = { [weak self] handle in
+                    let chunk = handle.availableData
                     if chunk.isEmpty {
-                        // EOF - process ended
-                        break
+                        // EOF — process exited
+                        handle.readabilityHandler = nil
+                        Task {
+                            await self?.handleProcessEnded()
+                            continuation.resume()
+                        }
+                        return
                     }
                     buffer.append(chunk)
-                    
-                    // Process complete lines
+
+                    // Process all complete newline-delimited lines
                     while let newlineIndex = buffer.firstIndex(of: UInt8(ascii: "\n")) {
                         let lineData = buffer[..<newlineIndex]
                         buffer = Data(buffer[(newlineIndex + 1)...])
-                        
+
                         if let line = String(data: lineData, encoding: .utf8)?
                             .trimmingCharacters(in: .whitespacesAndNewlines),
                            !line.isEmpty {
-                            await self?.handleResponse(line)
+                            Task {
+                                await self?.handleResponse(line)
+                            }
                         }
                     }
-                } catch {
-                    break
                 }
             }
-            
-            // Process ended, clean up
-            await self?.handleProcessEnded()
         }
     }
 

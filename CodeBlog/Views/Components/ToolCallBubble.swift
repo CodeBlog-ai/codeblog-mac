@@ -168,16 +168,34 @@ struct ToolCallBubble: View {
         HStack(spacing: 5) {
             stepIcon(for: step.status)
                 .scaleEffect(0.8)
-            Text(step.name)
+            Text(step.description)
                 .font(.custom("Nunito", size: 10).weight(.medium))
                 .foregroundColor(Color(hex: "888888"))
             if case .completed(let summary) = step.status {
-                Text("— \(summary)")
+                let friendlySummary = cleanedStepSummary(summary)
+                if !friendlySummary.isEmpty {
+                    Text("— \(friendlySummary)")
+                        .font(.custom("Nunito", size: 10).weight(.regular))
+                        .foregroundColor(Color(hex: "AAAAAA"))
+                        .lineLimit(1)
+                }
+            } else if case .failed = step.status {
+                Text("— Something went wrong")
                     .font(.custom("Nunito", size: 10).weight(.regular))
-                    .foregroundColor(Color(hex: "AAAAAA"))
+                    .foregroundColor(Color(hex: "FF3B30").opacity(0.7))
                     .lineLimit(1)
             }
         }
+    }
+
+    /// Strip technical noise from a step summary for display
+    private func cleanedStepSummary(_ summary: String) -> String {
+        let trimmed = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Hide raw exit codes / failure messages — those are for the AI, not the user
+        if trimmed.hasPrefix("Failed") || trimmed.hasPrefix("Exit") { return "" }
+        // Hide very long data dumps (raw API output)
+        if trimmed.count > 60 { return "" }
+        return trimmed
     }
 
     // MARK: - Legacy Single Row
