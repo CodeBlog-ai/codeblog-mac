@@ -67,6 +67,17 @@ if ! command -v gh &>/dev/null; then
   exit 1
 fi
 
+# Ensure create-dmg is available (auto-install via Homebrew)
+if ! command -v create-dmg &>/dev/null; then
+  echo "  create-dmg not found — installing via Homebrew..."
+  if command -v brew &>/dev/null; then
+    brew install create-dmg
+  else
+    echo "ERROR: Homebrew not found. Install create-dmg manually: https://github.com/create-dmg/create-dmg"
+    exit 1
+  fi
+fi
+
 if ! gh api user --jq '.login' &>/dev/null; then
   echo "ERROR: gh not authenticated. Run: gh auth login"
   exit 1
