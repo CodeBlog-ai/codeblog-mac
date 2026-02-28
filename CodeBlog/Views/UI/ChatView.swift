@@ -15,6 +15,18 @@ private let chatViewDebugTimestampFormatter: DateFormatter = {
 }()
 
 struct ChatView: View {
+    private enum ModelPickerMode {
+        case providers
+        case thirdPartyModels
+    }
+
+    private struct ThirdPartySelectionConfig {
+        let provider: ThirdPartyProvider
+        let endpoint: String
+        let apiKey: String
+        let selectedModel: String?
+    }
+
     @ObservedObject private var chatService = ChatService.shared
     @StateObject private var auth = CodeBlogAuthService.shared
     @State private var inputText = ""
@@ -33,6 +45,13 @@ struct ChatView: View {
     @State private var showHistoryPopover = false
     @State private var isEditingTitle = false
     @State private var editingTitleText = ""
+    @State private var modelPickerMode: ModelPickerMode = .providers
+    @State private var thirdPartyPickerConfig: ThirdPartySelectionConfig?
+    @State private var thirdPartyModelOptions: [String] = []
+    @State private var thirdPartyModelFetchError: String?
+    @State private var thirdPartyManualModel: String = ""
+    @State private var isFetchingThirdPartyModels = false
+    @State private var codeblogCreditModel: String = ""
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var welcomePrompts: [WelcomePrompt] {
@@ -83,6 +102,7 @@ struct ChatView: View {
         }
         .onAppear {
             chatService.loadConversationsList()
+            fetchCodeBlogCreditModel()
         }
         .alert("Switch model?", isPresented: $showToolSwitchConfirm) {
             Button("Switch and Reset", role: .destructive) {
@@ -635,6 +655,9 @@ struct ChatView: View {
     private var modelSelector: some View {
         Button(action: {
             showAgentPicker = false
+            if !showModelPicker {
+                modelPickerMode = .providers
+            }
             showModelPicker.toggle()
         }) {
             HStack(spacing: 5) {
@@ -681,7 +704,7 @@ struct ChatView: View {
         let provider = LLMProviderType.load()
         switch provider {
         case .codeblogBackend:
-            return "Sonnet 4.5"
+            return codeblogCreditModelShortName
         case .geminiDirect:
             return "Gemini"
         case .ollamaLocal:
@@ -695,12 +718,25 @@ struct ChatView: View {
     }
 
     private var modelPickerPopover: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            switch modelPickerMode {
+            case .providers:
+                providerPickerContent
+            case .thirdPartyModels:
+                thirdPartyModelPickerContent
+            }
+        }
+        .frame(minWidth: 260)
+        .padding(.vertical, 4)
+    }
+
+    private var providerPickerContent: some View {
         let currentProvider = LLMProviderType.load().canonicalProviderID
 
         return VStack(alignment: .leading, spacing: 0) {
             modelPickerRow(
                 label: "CodeBlog AI",
-                subtitle: "Sonnet 4.5 \u{00B7} Uses your credits",
+                subtitle: "\(codeblogCreditModelShortName) \u{00B7} Uses your credits first",
                 icon: "sparkles",
                 isSelected: currentProvider == "codeblog",
                 action: { switchModel(.codeblogBackend()) }
@@ -720,6 +756,13 @@ struct ChatView: View {
                 action: { switchModel(.chatGPTClaude) }
             )
             modelPickerRow(
+                label: "Third-party",
+                subtitle: thirdPartySubtitle(),
+                icon: "network",
+                isSelected: currentProvider == "thirdparty",
+                action: { openThirdPartyModelPicker() }
+            )
+            modelPickerRow(
                 label: "Ollama",
                 subtitle: "Run models locally",
                 icon: "desktopcomputer",
@@ -727,8 +770,104 @@ struct ChatView: View {
                 action: { switchModel(.ollamaLocal()) }
             )
         }
-        .frame(minWidth: 220)
-        .padding(.vertical, 4)
+    }
+
+    private var thirdPartyModelPickerContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Button(action: {
+                    modelPickerMode = .providers
+                }) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(Color(hex: "9B7753"))
+                        .frame(width: 22, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+
+                Text(thirdPartyPickerHeaderTitle)
+                    .font(.custom("Nunito", size: 12).weight(.bold))
+                    .foregroundColor(Color(hex: "5C3D2E"))
+
+                Spacer()
+
+                Button(action: { reloadThirdPartyModels() }) {
+                    if isFetchingThirdPartyModels {
+                        ProgressView()
+                            .scaleEffect(0.5)
+                            .frame(width: 14, height: 14)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(Color(hex: "9B7753"))
+                            .frame(width: 14, height: 14)
+                    }
+                }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+                .disabled(isFetchingThirdPartyModels || thirdPartyPickerConfig == nil)
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 4)
+
+            if isFetchingThirdPartyModels {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                    Text("Fetching models...")
+                        .font(.custom("Nunito", size: 11))
+                        .foregroundColor(.black.opacity(0.5))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+            } else if !thirdPartyModelOptions.isEmpty {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(thirdPartyModelOptions, id: \.self) { model in
+                            modelPickerRow(
+                                label: model,
+                                subtitle: "Use this model",
+                                icon: "cpu",
+                                isSelected: model == currentThirdPartyModel,
+                                action: { applyThirdPartyModel(model) }
+                            )
+                        }
+                    }
+                }
+                .frame(maxHeight: 220)
+            } else if let error = thirdPartyModelFetchError {
+                Text(error)
+                    .font(.custom("Nunito", size: 11))
+                    .foregroundColor(Color(hex: "B55A1D"))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Manual model ID")
+                    .font(.custom("Nunito", size: 11).weight(.semibold))
+                    .foregroundColor(Color(hex: "7F5B44"))
+
+                TextField("e.g. gpt-4o-mini", text: $thirdPartyManualModel)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+
+                Button(action: {
+                    applyThirdPartyModel(thirdPartyManualModel)
+                }) {
+                    Text("Use this model")
+                        .font(.custom("Nunito", size: 11).weight(.semibold))
+                        .foregroundColor(Color(hex: "F96E00"))
+                }
+                .buttonStyle(.plain)
+                .pointingHandCursor()
+                .disabled(thirdPartyManualModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || thirdPartyPickerConfig == nil)
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
+        }
     }
 
     private func modelPickerRow(label: String, subtitle: String, icon: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
@@ -826,7 +965,231 @@ struct ChatView: View {
             break
         }
         resetConversation()
+        modelPickerMode = .providers
         withAnimation { showModelPicker = false }
+    }
+
+    private var thirdPartyPickerHeaderTitle: String {
+        if let config = thirdPartyPickerConfig {
+            return "\(config.provider.displayName) Models"
+        }
+        return "Third-party Models"
+    }
+
+    private var currentThirdPartyModel: String {
+        if let explicit = thirdPartyPickerConfig?.selectedModel,
+           !explicit.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return explicit.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return thirdPartyManualModel.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func openThirdPartyModelPicker() {
+        modelPickerMode = .thirdPartyModels
+        guard let config = persistedThirdPartyConfig() else {
+            thirdPartyPickerConfig = nil
+            thirdPartyModelOptions = []
+            thirdPartyManualModel = ""
+            thirdPartyModelFetchError = "Configure third-party API in onboarding/settings first."
+            return
+        }
+
+        thirdPartyPickerConfig = config
+        thirdPartyManualModel = (config.selectedModel ?? config.provider.defaultModel)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        thirdPartyModelFetchError = nil
+        reloadThirdPartyModels()
+    }
+
+    private func reloadThirdPartyModels() {
+        guard let config = thirdPartyPickerConfig else { return }
+        isFetchingThirdPartyModels = true
+        thirdPartyModelFetchError = nil
+
+        Task { @MainActor in
+            do {
+                guard let url = LocalEndpointUtilities.modelsURL(baseURL: config.endpoint) else {
+                    isFetchingThirdPartyModels = false
+                    thirdPartyModelFetchError = "Invalid third-party base URL."
+                    return
+                }
+
+                var request = URLRequest(url: url)
+                request.timeoutInterval = 15
+                if config.provider.usesAnthropicFormat {
+                    request.setValue(config.apiKey, forHTTPHeaderField: "x-api-key")
+                    request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+                } else {
+                    request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+                }
+
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    isFetchingThirdPartyModels = false
+                    thirdPartyModelFetchError = "Model list request failed."
+                    return
+                }
+
+                guard http.statusCode == 200 else {
+                    isFetchingThirdPartyModels = false
+                    thirdPartyModelFetchError = "Failed to fetch models (HTTP \(http.statusCode))."
+                    return
+                }
+
+                let snippet = String(data: data, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .prefix(220)
+                    .lowercased() ?? ""
+                if snippet.contains("<!doctype html") || snippet.contains("<html") {
+                    isFetchingThirdPartyModels = false
+                    thirdPartyModelFetchError = "Endpoint returned HTML, please verify API base URL."
+                    return
+                }
+
+                let models = parseThirdPartyModelIDs(from: data)
+                thirdPartyModelOptions = models
+                isFetchingThirdPartyModels = false
+
+                if models.isEmpty {
+                    thirdPartyModelFetchError = "No models returned. You can input model ID manually."
+                } else if !thirdPartyManualModel.isEmpty,
+                          !models.contains(thirdPartyManualModel) {
+                    thirdPartyManualModel = models[0]
+                }
+            } catch {
+                isFetchingThirdPartyModels = false
+                thirdPartyModelFetchError = "Could not fetch models: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func parseThirdPartyModelIDs(from data: Data) -> [String] {
+        struct ModelItem: Decodable {
+            let id: String
+        }
+        struct DataResponse: Decodable {
+            let data: [ModelItem]?
+        }
+        struct ModelsResponse: Decodable {
+            let models: [ModelItem]?
+        }
+
+        if let decoded = try? JSONDecoder().decode(DataResponse.self, from: data),
+           let items = decoded.data {
+            return items.map(\.id).sorted()
+        }
+
+        if let decoded = try? JSONDecoder().decode([ModelItem].self, from: data) {
+            return decoded.map(\.id).sorted()
+        }
+
+        if let decoded = try? JSONDecoder().decode([String].self, from: data) {
+            return decoded.sorted()
+        }
+
+        if let decoded = try? JSONDecoder().decode(ModelsResponse.self, from: data),
+           let items = decoded.models {
+            return items.map(\.id).sorted()
+        }
+
+        return []
+    }
+
+    private func applyThirdPartyModel(_ model: String) {
+        guard let config = thirdPartyPickerConfig else { return }
+        let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        UserDefaults.standard.set(trimmed, forKey: ThirdPartyProviderDefaults.modelKey)
+        thirdPartyManualModel = trimmed
+        thirdPartyPickerConfig = ThirdPartySelectionConfig(
+            provider: config.provider,
+            endpoint: config.endpoint,
+            apiKey: config.apiKey,
+            selectedModel: trimmed
+        )
+
+        switchModel(.thirdPartyAPI(
+            provider: config.provider,
+            endpoint: config.endpoint,
+            model: trimmed
+        ))
+    }
+
+    private func persistedThirdPartyConfig() -> ThirdPartySelectionConfig? {
+        guard let kindRaw = UserDefaults.standard.string(forKey: ThirdPartyProviderDefaults.providerKindKey),
+              let kind = ThirdPartyProvider(rawValue: kindRaw) else {
+            return nil
+        }
+        let endpoint = (UserDefaults.standard.string(forKey: ThirdPartyProviderDefaults.baseURLKey) ?? kind.defaultBaseURL)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = UserDefaults.standard.string(forKey: ThirdPartyProviderDefaults.modelKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let keychainKey = ThirdPartyProviderDefaults.keychainKey(for: kind)
+        let apiKey = KeychainManager.shared.retrieve(for: keychainKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !endpoint.isEmpty, let apiKey, !apiKey.isEmpty else {
+            return nil
+        }
+
+        return ThirdPartySelectionConfig(
+            provider: kind,
+            endpoint: endpoint,
+            apiKey: apiKey,
+            selectedModel: model
+        )
+    }
+
+    private func persistedThirdPartyProvider() -> LLMProviderType? {
+        guard let config = persistedThirdPartyConfig() else {
+            return nil
+        }
+        return .thirdPartyAPI(provider: config.provider, endpoint: config.endpoint, model: config.selectedModel)
+    }
+
+    private func thirdPartySubtitle() -> String {
+        if let config = persistedThirdPartyConfig() {
+            if let model = config.selectedModel, !model.isEmpty {
+                return "\(config.provider.displayName) · \(model)"
+            }
+            return config.provider.displayName
+        }
+        return "Configure in onboarding/settings"
+    }
+
+    // MARK: - CodeBlog Credit Model
+
+    private var codeblogCreditModelShortName: String {
+        guard !codeblogCreditModel.isEmpty else { return "CodeBlog AI" }
+        // "claude-sonnet-4-6" → "Sonnet 4.6"
+        let name = codeblogCreditModel
+            .replacingOccurrences(of: "claude-", with: "")
+            .replacingOccurrences(of: "-", with: " ")
+        let parts = name.split(separator: " ")
+        if parts.count >= 2, let family = parts.first {
+            let version = parts.dropFirst().joined(separator: ".")
+            return "\(family.prefix(1).uppercased())\(family.dropFirst()) \(version)"
+        }
+        return name.prefix(1).uppercased() + name.dropFirst()
+    }
+
+    private func fetchCodeBlogCreditModel() {
+        guard let token = CodeBlogTokenResolver.currentToken(),
+              let url = URL(string: "https://codeblog.ai/api/v1/ai-credit/balance") else { return }
+
+        Task { @MainActor in
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 10
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+            guard let (data, response) = try? await URLSession.shared.data(for: request),
+                  let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let model = json["model"] as? String, !model.isEmpty else { return }
+
+            codeblogCreditModel = model
+        }
     }
 
     // MARK: - History Popover

@@ -24,9 +24,9 @@ enum ChatStreamEvent: Sendable {
     /// Thinking/reasoning content (shown in collapsible UI)
     case thinking(String)
     /// Tool/command execution started
-    case toolStart(command: String)
+    case toolStart(callID: String, name: String, args: String)
     /// Tool/command execution completed
-    case toolEnd(output: String, exitCode: Int?)
+    case toolResult(callID: String, name: String, result: String, isError: Bool, exitCode: Int?)
     /// Incremental text chunk from response
     case textDelta(String)
     /// Final complete response
@@ -360,7 +360,8 @@ struct ChatCLIProcessRunner {
         var lineBuffer = Data()
         var sawTextDelta = false
         var didYieldComplete = false
-        var hasActiveToolCall = false  // Track if a tool is currently running (for Claude)
+        var activeToolCallID: String?
+        var activeToolName: String?
 
         stdoutHandle.readabilityHandler = { handle in
             let data = handle.availableData
@@ -378,35 +379,86 @@ struct ChatCLIProcessRunner {
                 guard !line.isEmpty else { continue }
 
                 if let event = self.parseJSONLLine(tool: tool, line: line) {
-                    // Auto-close tool call when text starts arriving (Claude mode)
-                    if case .textDelta(_) = event, hasActiveToolCall {
-                        continuation.yield(.toolEnd(output: "", exitCode: 0))
-                        hasActiveToolCall = false
+                    // Auto-close unresolved tool call when text starts arriving (Claude mode)
+                    if case .textDelta(_) = event,
+                       let callID = activeToolCallID,
+                       let toolName = activeToolName {
+                        continuation.yield(.toolResult(
+                            callID: callID,
+                            name: toolName,
+                            result: "",
+                            isError: false,
+                            exitCode: 0
+                        ))
+                        activeToolCallID = nil
+                        activeToolName = nil
                     }
 
-                    if case .toolStart(_) = event {
-                        // Close previous tool if still active
-                        if hasActiveToolCall {
-                            continuation.yield(.toolEnd(output: "", exitCode: 0))
+                    if case .complete(_) = event,
+                       let callID = activeToolCallID,
+                       let toolName = activeToolName {
+                        continuation.yield(.toolResult(
+                            callID: callID,
+                            name: toolName,
+                            result: "",
+                            isError: false,
+                            exitCode: 0
+                        ))
+                        activeToolCallID = nil
+                        activeToolName = nil
+                    }
+
+                    var normalizedEvent = event
+                    switch event {
+                    case .toolStart(let callID, let name, let args):
+                        if let pendingCallID = activeToolCallID,
+                           let pendingToolName = activeToolName {
+                            continuation.yield(.toolResult(
+                                callID: pendingCallID,
+                                name: pendingToolName,
+                                result: "",
+                                isError: false,
+                                exitCode: 0
+                            ))
                         }
-                        hasActiveToolCall = true
+                        activeToolCallID = callID
+                        activeToolName = name
+                        normalizedEvent = .toolStart(callID: callID, name: name, args: args)
+
+                    case .toolResult(let callID, let name, let result, let isError, let exitCode):
+                        var resolvedCallID = callID
+                        var resolvedName = name
+                        if resolvedCallID.isEmpty, let activeToolCallID {
+                            resolvedCallID = activeToolCallID
+                        }
+                        if resolvedName.isEmpty, let activeToolName {
+                            resolvedName = activeToolName
+                        }
+                        normalizedEvent = .toolResult(
+                            callID: resolvedCallID,
+                            name: resolvedName,
+                            result: result,
+                            isError: isError,
+                            exitCode: exitCode
+                        )
+                        activeToolCallID = nil
+                        activeToolName = nil
+
+                    default:
+                        break
                     }
 
-                    if case .toolEnd(_, _) = event {
-                        hasActiveToolCall = false
-                    }
-
-                    if case .textDelta(let text) = event {
+                    if case .textDelta(let text) = normalizedEvent {
                         sawTextDelta = true
                         accumulatedText += text
-                    } else if case .complete(let text) = event {
+                    } else if case .complete(let text) = normalizedEvent {
                         if sawTextDelta || didYieldComplete {
                             continue
                         }
                         didYieldComplete = true
                         accumulatedText = text
                     }
-                    continuation.yield(event)
+                    continuation.yield(normalizedEvent)
                 }
             }
         }
@@ -437,10 +489,24 @@ struct ChatCLIProcessRunner {
             let line = stripANSIEscapes(trimmed)
             if !line.isEmpty, let event = parseJSONLLine(tool: tool, line: line) {
                 var shouldYield = true
-                if case .textDelta(let text) = event {
+                var normalizedEvent = event
+                if case .toolResult(let callID, let name, let result, let isError, let exitCode) = event {
+                    let resolvedCallID = callID.isEmpty ? (activeToolCallID ?? callID) : callID
+                    let resolvedName = name.isEmpty ? (activeToolName ?? name) : name
+                    normalizedEvent = .toolResult(
+                        callID: resolvedCallID,
+                        name: resolvedName,
+                        result: result,
+                        isError: isError,
+                        exitCode: exitCode
+                    )
+                    activeToolCallID = nil
+                    activeToolName = nil
+                }
+                if case .textDelta(let text) = normalizedEvent {
                     sawTextDelta = true
                     accumulatedText += text
-                } else if case .complete(let text) = event {
+                } else if case .complete(let text) = normalizedEvent {
                     if sawTextDelta || didYieldComplete {
                         shouldYield = false
                     } else {
@@ -449,7 +515,7 @@ struct ChatCLIProcessRunner {
                     }
                 }
                 if shouldYield {
-                    continuation.yield(event)
+                    continuation.yield(normalizedEvent)
                 }
             }
         }
@@ -473,9 +539,7 @@ struct ChatCLIProcessRunner {
     private func cliEnvironment() -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
 
-        if let apiKey = KeychainManager.shared.retrieve(for: "codeblog")?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !apiKey.isEmpty {
+        if let apiKey = CodeBlogTokenResolver.currentToken() {
             environment["CODEBLOG_API_KEY"] = apiKey
         }
 
@@ -510,10 +574,16 @@ struct ChatCLIProcessRunner {
 
         case "command_execution":
             if event.type == "item.started", let command = item.command {
-                return .toolStart(command: command)
+                return .toolStart(callID: UUID().uuidString, name: command, args: "")
             } else if event.type == "item.completed" {
                 let output = item.aggregated_output ?? ""
-                return .toolEnd(output: output, exitCode: item.exit_code)
+                return .toolResult(
+                    callID: "",
+                    name: item.command ?? "",
+                    result: output,
+                    isError: (item.exit_code ?? 0) != 0,
+                    exitCode: item.exit_code
+                )
             }
 
         case "agent_message":
@@ -541,7 +611,7 @@ struct ChatCLIProcessRunner {
                let block = streamEvent.content_block,
                block.type == "tool_use",
                let toolName = block.name {
-                return .toolStart(command: toolName)
+                return .toolStart(callID: UUID().uuidString, name: toolName, args: "")
             }
 
             // Tool result: content_block_stop after a tool_use block is handled implicitly

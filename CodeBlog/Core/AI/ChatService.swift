@@ -126,6 +126,8 @@ final class ChatService: ObservableObject {
     private var currentSessionId: String?
     private var currentProcessingTask: Task<Void, Never>?
     private let storage = ChatStorageManager.shared
+    private var cachedMCPToolsSection: String?
+    private var lastMCPToolsRefreshAt: Date?
 
     // MARK: - Debug Logging
 
@@ -288,9 +290,16 @@ final class ChatService: ObservableObject {
     // MARK: - Conversation Processing
 
     private func processConversation() async {
+        await refreshMCPToolsSectionIfNeeded()
+
+        let supportsSessionResume = LLMProviderType.load().canonicalProviderID == "chatgpt_claude"
+        if !supportsSessionResume {
+            currentSessionId = nil
+        }
+
         // Build prompt - full prompt for new session, just user message for resume
         let prompt: String
-        let isResume = currentSessionId != nil
+        let isResume = supportsSessionResume && currentSessionId != nil
 
         if isResume {
             // For resumed sessions, just send the latest user message
@@ -305,6 +314,7 @@ final class ChatService: ObservableObject {
         // Track state during streaming
         var responseText = ""
         var currentToolId: UUID?
+        var toolCallIDMap: [String: UUID] = [:]
         var currentToolMessageId: UUID?
         var pendingToolSeparator = false
         var sawTextDelta = false
@@ -345,9 +355,11 @@ final class ChatService: ObservableObject {
                         status.thinkingText += text
                     }
 
-                case .toolStart(let command):
+                case .toolStart(let callID, let name, _):
+                    let command = name.isEmpty ? "unknown_tool" : name
                     log(.toolDetected, "Starting: \(command)")
-                    let toolId = UUID()
+                    let toolId = toolCallIDMap[callID] ?? UUID()
+                    toolCallIDMap[callID] = toolId
                     currentToolId = toolId
 
                     let stepName = toolDisplayName(from: command)
@@ -391,16 +403,18 @@ final class ChatService: ObservableObject {
                         ))
                     }
 
-                case .toolEnd(let output, let exitCode):
-                    log(.toolResult, "Exit \(exitCode ?? 0): \(output.prefix(100))...")
-                    let toolId = currentToolId
-                    let summary = toolResultSummary(output: output, exitCode: exitCode)
+                case .toolResult(let callID, let name, let result, let isError, let exitCode):
+                    let command = name.isEmpty ? "tool" : name
+                    let resolvedExitCode = exitCode ?? (isError ? 1 : 0)
+                    log(.toolResult, "Exit \(resolvedExitCode): \(result.prefix(100))...")
+                    let toolId = toolCallIDMap[callID] ?? currentToolId
+                    let summary = toolResultSummary(output: result, exitCode: resolvedExitCode)
 
                     // Update the specific step within the tool message
                     if let msgId = currentToolMessageId,
                        let idx = messages.firstIndex(where: { $0.id == msgId }) {
                         if let stepIdx = messages[idx].toolSteps.firstIndex(where: { $0.id == toolId }) {
-                            if let exitCode, exitCode != 0 {
+                            if resolvedExitCode != 0 {
                                 messages[idx].toolSteps[stepIdx].status = .failed(error: summary)
                             } else {
                                 messages[idx].toolSteps[stepIdx].status = .completed(summary: summary)
@@ -416,13 +430,13 @@ final class ChatService: ObservableObject {
                         guard let toolIndex else { return }
                         let summary = toolSummary(
                             command: status.tools[toolIndex].command,
-                            output: output,
-                            exitCode: exitCode
+                            output: result,
+                            exitCode: resolvedExitCode
                         )
                         status.tools[toolIndex].summary = summary
-                        status.tools[toolIndex].output = output
-                        status.tools[toolIndex].exitCode = exitCode
-                        if let exitCode, exitCode != 0 {
+                        status.tools[toolIndex].output = result
+                        status.tools[toolIndex].exitCode = resolvedExitCode
+                        if resolvedExitCode != 0 {
                             status.tools[toolIndex].state = .failed
                             status.stage = .error
                             status.errorMessage = summary
@@ -431,20 +445,21 @@ final class ChatService: ObservableObject {
                         }
                     }
                     currentToolId = nil
+                    toolCallIDMap.removeValue(forKey: callID)
                     pendingToolSeparator = true
 
                 case .textDelta(let chunk):
                     sawTextDelta = true
                     appendWithToolSeparatorIfNeeded(chunk)
                     streamingText = responseText
-                    // Finalize tool message when text starts arriving
+                    // Mark tool steps as completed (but keep currentToolMessageId
+                    // so subsequent tool calls in the same response reuse the bubble)
                     if let toolMsgId = currentToolMessageId,
                        let toolIdx = messages.firstIndex(where: { $0.id == toolMsgId }) {
                         let stepCount = messages[toolIdx].toolSteps.count
                         messages[toolIdx].toolStatus = .completed(
                             summary: "\(stepCount) tool\(stepCount > 1 ? "s" : "") completed"
                         )
-                        currentToolMessageId = nil
                     }
                     updateWorkStatus { status in
                         if status.stage != .error {
@@ -471,6 +486,16 @@ final class ChatService: ObservableObject {
                     }
 
                 case .complete(let text):
+                    // Finalize any open tool message before processing text
+                    if let toolMsgId = currentToolMessageId,
+                       let toolIdx = messages.firstIndex(where: { $0.id == toolMsgId }) {
+                        let stepCount = messages[toolIdx].toolSteps.count
+                        messages[toolIdx].toolStatus = .completed(
+                            summary: "\(stepCount) tool\(stepCount > 1 ? "s" : "") completed"
+                        )
+                        currentToolMessageId = nil
+                    }
+
                     if responseText.isEmpty {
                         responseText = text
                         pendingToolSeparator = false
@@ -509,6 +534,21 @@ final class ChatService: ObservableObject {
                 }
             }
         } catch {
+            // Finalize any open tool message on error
+            if let toolMsgId = currentToolMessageId,
+               let toolIdx = messages.firstIndex(where: { $0.id == toolMsgId }) {
+                let stepCount = messages[toolIdx].toolSteps.count
+                let allDone = messages[toolIdx].toolSteps.allSatisfy { step in
+                    if case .running = step.status { return false }
+                    return true
+                }
+                if allDone {
+                    messages[toolIdx].toolStatus = .completed(
+                        summary: "\(stepCount) tool\(stepCount > 1 ? "s" : "") completed"
+                    )
+                }
+            }
+
             // Show error
             log(.error, "LLM error: \(error.localizedDescription)")
             self.error = error.localizedDescription
@@ -789,39 +829,58 @@ final class ChatService: ObservableObject {
         """
     }
 
+    private func refreshMCPToolsSectionIfNeeded(force: Bool = false) async {
+        let now = Date()
+        if !force,
+           let last = lastMCPToolsRefreshAt,
+           now.timeIntervalSince(last) < 300,
+           cachedMCPToolsSection != nil {
+            return
+        }
+
+        do {
+            let tools = try await MCPStdioClient.shared.listTools().sorted { $0.name < $1.name }
+            cachedMCPToolsSection = buildMCPToolsSection(tools)
+            lastMCPToolsRefreshAt = now
+        } catch {
+            // Keep fallback section if MCP discovery fails.
+            if cachedMCPToolsSection == nil {
+                cachedMCPToolsSection = fallbackMCPToolsSection()
+                lastMCPToolsRefreshAt = now
+            }
+        }
+    }
+
     private func mcpToolsSection() -> String {
-        """
-        ## TOOLS
+        cachedMCPToolsSection ?? fallbackMCPToolsSection()
+    }
 
-        ### Session Tools
-        - scan_sessions: Find recent coding sessions from IDEs.
-          Parameters: limit (int, default 20), source (string, optional filter by IDE name)
-        - read_session: Read the full conversation from a specific session.
-          Parameters: session_id (string, required)
-        - analyze_session: Break down a session into topics, problems solved, and code snippets.
-          Parameters: session_id (string, required)
-
-        ### Posting Tools
-        - auto_post: Intelligently pick and analyze a recent session, then generate and publish a blog post.
-          Parameters: dry_run (bool, true for preview without publishing)
-        - preview_post: Generate a preview of a post before publishing.
-          Parameters: mode (string: 'auto'|'manual'), title? (string), content? (string), tags? (string[]), category? (string)
-        - confirm_post: Publish a previewed post.
-        - create_draft: Save a draft post without publishing.
-          Parameters: title (string), content (string), category (string), tags (string[])
-
-        ### Forum Tools
-        - browse_posts: Browse and search forum posts.
-        - read_post: Read a specific post with comments.
-        - collect_daily_stats: Collect coding statistics for the day.
-
-        ### Agent Tools
-        - manage_agents: List, create, delete, or switch CodeBlog agents.
-          Parameters: action (string: list|create|delete|switch), name? (string), agent_id? (string)
+    private func buildMCPToolsSection(_ tools: [MCPToolDefinition]) -> String {
+        var output = "## TOOLS\n\n"
+        output += "Below are live MCP tools discovered at runtime. Use them whenever relevant.\n\n"
+        for tool in tools {
+            output += "- \(tool.name): \(tool.description)\n"
+            if let propertyNames = tool.inputSchema["properties"]?.objectValue?.keys.sorted(),
+               !propertyNames.isEmpty {
+                output += "  Parameters: \(propertyNames.joined(separator: ", "))\n"
+            }
+        }
+        output += """
 
         When the user asks about coding sessions, use scan_sessions first.
         When they want to create a post, use preview_post or auto_post with dry_run=true first for preview.
         Always confirm with the user before publishing.
+        """
+        return output
+    }
+
+    private func fallbackMCPToolsSection() -> String {
+        """
+        ## TOOLS
+
+        Use MCP tools to scan sessions, analyze content, and post to CodeBlog.
+        Prefer scan_sessions -> read_session/analyze_session as your default workflow.
+        Always show complete preview before publish-related actions.
         """
     }
 

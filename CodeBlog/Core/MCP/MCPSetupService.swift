@@ -18,6 +18,11 @@ final class MCPSetupService {
 
     private let fileManager = FileManager.default
 
+    struct MCPRuntimeCommand: Sendable {
+        let command: String
+        let args: [String]
+    }
+
     private init() {}
 
     func checkStatus() async -> MCPStatus {
@@ -25,7 +30,8 @@ final class MCPSetupService {
         let codexPath = codexConfigURL.path
 
         return await Task.detached(priority: .utility) {
-            let versionResult = LoginShellRunner.run("codeblog-mcp --version", timeout: 15)
+            let runtime = Self.resolveRuntimeCommand()
+            let versionResult = LoginShellRunner.run(Self.runtimeVersionCommand(runtime), timeout: 15)
             let isInstalled = versionResult.exitCode == 0
             let version = isInstalled
                 ? versionResult.stdout.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: .newlines).first
@@ -41,21 +47,27 @@ final class MCPSetupService {
     }
 
     func installMCP() async throws {
-        let result = await runShell("npm install -g codeblog-mcp", timeout: 300)
+        let runtime = Self.resolveRuntimeCommand()
+        let result = await runShell(Self.runtimeVersionCommand(runtime), timeout: 20)
         guard result.exitCode == 0 else {
-            throw MCPSetupError.commandFailed(result.stderr.isEmpty ? result.stdout : result.stderr)
+            throw MCPSetupError.commandFailed("""
+            Embedded MCP runtime is unavailable.
+            Expected command: \(runtime.command) \(runtime.args.joined(separator: " "))
+            Error: \(result.stderr.isEmpty ? result.stdout : result.stderr)
+            """)
         }
     }
 
     func configureClaudeMCP(apiKey: String) async throws {
         let fileURL = claudeSettingsURL
         try ensureParentDirectory(for: fileURL)
+        let runtime = Self.resolveRuntimeCommand()
 
         var settings = try readJSONDictionary(from: fileURL)
         var mcpServers = settings["mcpServers"] as? [String: Any] ?? [:]
         mcpServers["codeblog"] = [
-            "command": "npx",
-            "args": ["codeblog-mcp"],
+            "command": runtime.command,
+            "args": runtime.args,
             "env": ["CODEBLOG_API_KEY": apiKey]
         ]
         settings["mcpServers"] = mcpServers
@@ -66,6 +78,7 @@ final class MCPSetupService {
     func configureCodexMCP(apiKey: String) async throws {
         let fileURL = codexConfigURL
         try ensureParentDirectory(for: fileURL)
+        let runtime = Self.resolveRuntimeCommand()
 
         let existingContent: String
         if fileManager.fileExists(atPath: fileURL.path) {
@@ -74,7 +87,7 @@ final class MCPSetupService {
             existingContent = ""
         }
 
-        let codeblogBlock = codexMCPBlock(apiKey: apiKey)
+        let codeblogBlock = codexMCPBlock(apiKey: apiKey, runtime: runtime)
         let updatedContent: String
 
         let pattern = #"(?ms)^\[mcp_servers\.codeblog\][\s\S]*?(?=^\[|\z)"#
@@ -138,19 +151,57 @@ final class MCPSetupService {
         try text.write(to: url, atomically: true, encoding: .utf8)
     }
 
-    private func codexMCPBlock(apiKey: String) -> String {
+    private func codexMCPBlock(apiKey: String, runtime: MCPRuntimeCommand) -> String {
         let escapedKey = apiKey
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+        let escapedCommand = runtime.command
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let escapedArgs = runtime.args
+            .map {
+                "\"" + $0
+                    .replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+            }
+            .joined(separator: ", ")
 
         return """
         [mcp_servers.codeblog]
-        command = "npx"
-        args = ["codeblog-mcp"]
+        command = "\(escapedCommand)"
+        args = [\(escapedArgs)]
 
         [mcp_servers.codeblog.env]
         CODEBLOG_API_KEY = "\(escapedKey)"
         """
+    }
+
+    nonisolated static func resolveRuntimeCommand() -> MCPRuntimeCommand {
+        if let resourceURL = Bundle.main.resourceURL {
+            let candidates = [
+                resourceURL.appendingPathComponent("mcp-runtime/codeblog-mcp").path,
+                resourceURL.appendingPathComponent("mcp-runtime/bin/codeblog-mcp").path,
+            ]
+
+            for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
+                return MCPRuntimeCommand(command: path, args: [])
+            }
+        }
+
+        if LoginShellRunner.isInstalled("codeblog-mcp") {
+            return MCPRuntimeCommand(command: "codeblog-mcp", args: [])
+        }
+        if LoginShellRunner.isInstalled("npx") {
+            return MCPRuntimeCommand(command: "npx", args: ["-y", "codeblog-mcp"])
+        }
+        return MCPRuntimeCommand(command: "codeblog-mcp", args: [])
+    }
+
+    nonisolated private static func runtimeVersionCommand(_ runtime: MCPRuntimeCommand) -> String {
+        let parts = ([runtime.command] + runtime.args + ["--version"])
+            .map { LoginShellRunner.shellEscape($0) }
+            .joined(separator: " ")
+        return "exec \(parts)"
     }
 
     nonisolated private static func isConfiguredInClaudeSettings(path: String) -> Bool {

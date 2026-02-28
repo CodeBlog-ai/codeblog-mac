@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 @MainActor
 protocol AppDeepLinkRouterDelegate: AnyObject {
@@ -10,6 +11,7 @@ final class AppDeepLinkRouter {
     enum Action: String {
         case startRecording = "start-recording"
         case stopRecording = "stop-recording"
+        case authComplete = "auth-complete"
 
         init?(identifier: String) {
             switch identifier.lowercased() {
@@ -17,6 +19,8 @@ final class AppDeepLinkRouter {
                 self = .startRecording
             case Self.stopRecording.rawValue, "stop", "pause":
                 self = .stopRecording
+            case Self.authComplete.rawValue:
+                self = .authComplete
             default:
                 return nil
             }
@@ -73,6 +77,8 @@ final class AppDeepLinkRouter {
             startRecording()
         case .stopRecording:
             stopRecording()
+        case .authComplete:
+            activateApp()
         }
     }
 
@@ -92,6 +98,15 @@ final class AppDeepLinkRouter {
         }
         delegate?.prepareForRecordingToggle(reason: "deeplink")
         AppState.shared.isRecording = false
+    }
+
+    private func activateApp() {
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        // Bring the main window to front if it exists
+        if let window = NSApplication.shared.windows.first(where: { $0.isVisible }) {
+            window.makeKeyAndOrderFront(nil)
+        }
+        print("[DeepLink] App activated via auth-complete")
     }
 
 }

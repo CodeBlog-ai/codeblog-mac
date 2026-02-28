@@ -55,18 +55,18 @@ struct AgentHomeView: View {
     /// No user-facing messages — just ensure the config files are correct.
     @MainActor
     private func ensureMCPConfigured() async {
-        guard let apiKey = KeychainManager.shared.retrieve(for: "codeblog"),
-              !apiKey.isEmpty else {
-            print("[AgentHome] No API key in Keychain, skipping MCP setup")
+        guard let apiKey = CodeBlogTokenResolver.currentToken() else {
+            print("[AgentHome] No CodeBlog API key available, skipping MCP setup")
             return
         }
 
-        let status = await MCPSetupService.shared.checkStatus()
+        var status = await MCPSetupService.shared.checkStatus()
 
         // If codeblog-mcp is not installed, try to install it silently
         if !status.isInstalled {
             print("[AgentHome] codeblog-mcp not found, installing...")
             try? await MCPSetupService.shared.installMCP()
+            status = await MCPSetupService.shared.checkStatus()
         }
 
         // Configure Claude and Codex MCP silently

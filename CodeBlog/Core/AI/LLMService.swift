@@ -23,7 +23,7 @@ protocol LLMServicing {
     func processBatch(_ batchId: Int64, progressHandler: ((LLMProcessingStep) -> Void)?, completion: @escaping (Result<ProcessedBatchResult, Error>) -> Void)
     func generateText(prompt: String) async throws -> String
     func generateTextStreaming(prompt: String) -> AsyncThrowingStream<String, Error>
-    /// Rich chat streaming with thinking, tool calls, and text events (ChatCLI only)
+    /// Rich chat streaming with thinking, tool calls, and text events
     /// - Parameter sessionId: Optional session ID to resume a previous conversation
     func generateChatStreaming(prompt: String, sessionId: String?) -> AsyncThrowingStream<ChatStreamEvent, Error>
     var batchingConfig: BatchingConfig { get }
@@ -86,10 +86,10 @@ final class LLMService: LLMServicing {
     }
 
     private func makeCodeBlogProvider(endpoint: String) -> CodeBlogBackendProvider? {
-        if let token = KeychainManager.shared.retrieve(for: "codeblog"), !token.isEmpty {
+        if let token = CodeBlogTokenResolver.currentToken() {
             return CodeBlogBackendProvider(token: token, endpoint: endpoint)
         }
-        print("❌ [LLMService] Failed to retrieve CodeBlog token from Keychain")
+        print("❌ [LLMService] Failed to retrieve CodeBlog token")
         return nil
     }
 
@@ -1006,10 +1006,16 @@ final class LLMService: LLMServicing {
         }
     }
 
-    // MARK: - Rich Chat Streaming (ChatCLI only)
+    // MARK: - Rich Chat Streaming
 
     func generateChatStreaming(prompt: String, sessionId: String? = nil) -> AsyncThrowingStream<ChatStreamEvent, Error> {
-        let chatCLI = makeChatCLIProvider()
-        return chatCLI.generateChatStreaming(prompt: prompt, sessionId: sessionId)
+        switch providerType {
+        case .chatGPTClaude:
+            let chatCLI = makeChatCLIProvider()
+            return chatCLI.generateChatStreaming(prompt: prompt, sessionId: sessionId)
+        default:
+            let runtime = MCPChatRuntime()
+            return runtime.generateChatStreaming(prompt: prompt, sessionId: sessionId)
+        }
     }
 }

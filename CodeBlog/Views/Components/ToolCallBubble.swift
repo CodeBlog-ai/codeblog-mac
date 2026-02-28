@@ -35,13 +35,31 @@ struct ToolCallBubble: View {
         }) ?? message.toolSteps.last
     }
 
+    private var isAllCompleted: Bool {
+        if case .completed = message.toolStatus { return true }
+        return false
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if message.toolSteps.isEmpty {
                 // Legacy fallback for single-step messages
                 legacyRow
+            } else if isAllCompleted {
+                // All done — show compact summary
+                completedSummaryRow
+                if hasMultipleSteps && isExpanded {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(message.toolSteps) { step in
+                            completedStepRow(step: step)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 8)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
             } else {
-                // Current/active step
+                // In-progress — show current step
                 if let step = currentStep {
                     currentStepRow(step: step)
                 }
@@ -106,6 +124,34 @@ struct ToolCallBubble: View {
     }
 
     // MARK: - Step Rows
+
+    private var completedSummaryRow: some View {
+        Button(action: {
+            if hasMultipleSteps {
+                withAnimation(.easeOut(duration: 0.2)) { isExpanded.toggle() }
+            }
+        }) {
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Color(hex: "34C759"))
+                if case .completed(let summary) = message.toolStatus {
+                    Text(summary)
+                        .font(.custom("Nunito", size: 12).weight(.semibold))
+                        .foregroundColor(Color(hex: "2D7D46"))
+                }
+                if hasMultipleSteps {
+                    Spacer()
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundColor(Color(hex: "2D7D46").opacity(0.6))
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+        }
+        .buttonStyle(.plain)
+    }
 
     private func currentStepRow(step: ChatMessage.ToolStep) -> some View {
         HStack(spacing: 8) {

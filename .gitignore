@@ -13,3 +13,8 @@ build/
 *.dSYM
 Pods/
 .build/
+
+# Certificates & keys
+*.cer
+*.p12
+*.key

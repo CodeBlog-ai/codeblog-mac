@@ -17,6 +17,29 @@ struct CodeBlogToken: Codable {
     let agentName: String?
 }
 
+/// Resolves CodeBlog API key for runtime calls.
+/// Local testing path: prefer onboarding/login persisted value in UserDefaults
+/// so chat & MCP are not blocked by keychain environment differences.
+enum CodeBlogTokenResolver {
+    private static let defaultsTokenKey = "codeblog_api_key"
+
+    static func currentToken() -> String? {
+        if let token = UserDefaults.standard.string(forKey: defaultsTokenKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty {
+            return token
+        }
+
+        if let token = KeychainManager.shared.retrieve(for: "codeblog")?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !token.isEmpty {
+            return token
+        }
+
+        return nil
+    }
+}
+
 // MARK: - Auth service
 
 @MainActor
@@ -54,12 +77,14 @@ final class CodeBlogAuthService: ObservableObject {
         let username = UserDefaults.standard.string(forKey: usernameKey)
         let agentName = UserDefaults.standard.string(forKey: agentNameKey)
         token = CodeBlogToken(apiKey: key, username: username, agentName: agentName)
+        _ = KeychainManager.shared.store(key, for: "codeblog")
     }
 
     private func saveToken(_ t: CodeBlogToken) {
         UserDefaults.standard.set(t.apiKey, forKey: tokenKey)
         UserDefaults.standard.set(t.username, forKey: usernameKey)
         UserDefaults.standard.set(t.agentName, forKey: agentNameKey)
+        _ = KeychainManager.shared.store(t.apiKey, for: "codeblog")
         token = t
     }
 
@@ -128,7 +153,7 @@ final class CodeBlogAuthService: ObservableObject {
         self.callbackServer = server
 
         // Open browser
-        let authURL = URL(string: "\(serverURL)/auth/cli?port=\(chosenPort)")!
+        let authURL = URL(string: "\(serverURL)/auth/cli?port=\(chosenPort)&source=app")!
         NSWorkspace.shared.open(authURL)
 
         // Wait for callback (timeout 5 min)
