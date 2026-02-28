@@ -1,6 +1,9 @@
 import Foundation
 
 final class MCPChatRuntime {
+    /// Shared singleton instance to persist state across sessions
+    static let shared = MCPChatRuntime()
+    
     private enum ProviderTransport {
         case openAICompatible(endpoint: URL, headers: [String: String], model: String, providerLabel: String)
         case anthropic(endpoint: URL, apiKey: String, model: String, providerLabel: String)
@@ -33,6 +36,12 @@ final class MCPChatRuntime {
     }
 
     private let mcpClient = MCPStdioClient.shared
+    
+    /// Persisted preview ID across sessions for confirm_post auto-fill
+    private var latestPreviewID: String?
+    
+    /// Get the latest preview ID (for external access if needed)
+    var currentPreviewID: String? { latestPreviewID }
 
     func generateChatStreaming(prompt: String, sessionId: String? = nil) -> AsyncThrowingStream<ChatStreamEvent, Error> {
         AsyncThrowingStream { continuation in
@@ -111,7 +120,6 @@ final class MCPChatRuntime {
             ["role": "user", "content": prompt]
         ]
         var fullText = ""
-        var latestPreviewID: String?
 
         for _ in 0..<10 {
             var turnText = ""
@@ -177,9 +185,14 @@ final class MCPChatRuntime {
 
                 do {
                     let result = try await mcpClient.callTool(name: call.name, arguments: parsedArguments)
+                    print("[MCPChatRuntime] Tool result for \(call.name): isError=\(result.isError), text=\(result.text.prefix(500))...")
                     if call.name == "preview_post",
                        let previewID = extractPreviewID(from: result.text) {
+                        print("[MCPChatRuntime] Extracted preview_id: \(previewID)")
                         latestPreviewID = previewID
+                    }
+                    if call.name == "confirm_post" {
+                        print("[MCPChatRuntime] confirm_post result - isError: \(result.isError), full response: \(result.text)")
                     }
                     continuation.yield(.toolResult(
                         callID: call.id,
@@ -195,6 +208,7 @@ final class MCPChatRuntime {
                     ])
                 } catch {
                     let message = error.localizedDescription
+                    print("[MCPChatRuntime] Tool error for \(call.name): \(message)")
                     continuation.yield(.toolResult(
                         callID: call.id,
                         name: call.name,
@@ -434,9 +448,31 @@ final class MCPChatRuntime {
 
             var toolResults: [[String: Any]] = []
             for call in response.toolCalls {
-                continuation.yield(.toolStart(callID: call.id, name: call.name, args: call.inputRaw))
+                var arguments = call.input
+                // Auto-fill preview_id for confirm_post if not provided
+                if call.name == "confirm_post" {
+                    let providedPreviewID = normalizedPreviewID(from: arguments)
+                    if providedPreviewID == nil,
+                       let previewID = latestPreviewID, !previewID.isEmpty {
+                        arguments["preview_id"] = .string(previewID)
+                    }
+                }
+                let effectiveArgsRaw = argumentsJSONString(arguments) ?? call.inputRaw
+                
+                print("[MCPChatRuntime] Tool call: \(call.name), args: \(effectiveArgsRaw)")
+                continuation.yield(.toolStart(callID: call.id, name: call.name, args: effectiveArgsRaw))
                 do {
-                    let result = try await mcpClient.callTool(name: call.name, arguments: call.input)
+                    let result = try await mcpClient.callTool(name: call.name, arguments: arguments)
+                    print("[MCPChatRuntime] Tool result for \(call.name): isError=\(result.isError), text=\(result.text.prefix(500))...")
+                    // Extract and persist preview_id from preview_post results
+                    if call.name == "preview_post",
+                       let previewID = extractPreviewID(from: result.text) {
+                        print("[MCPChatRuntime] Extracted preview_id: \(previewID)")
+                        latestPreviewID = previewID
+                    }
+                    if call.name == "confirm_post" {
+                        print("[MCPChatRuntime] confirm_post result - isError: \(result.isError), full response: \(result.text)")
+                    }
                     continuation.yield(.toolResult(
                         callID: call.id,
                         name: call.name,
@@ -452,6 +488,7 @@ final class MCPChatRuntime {
                     ])
                 } catch {
                     let message = error.localizedDescription
+                    print("[MCPChatRuntime] Tool error for \(call.name): \(message)")
                     continuation.yield(.toolResult(
                         callID: call.id,
                         name: call.name,

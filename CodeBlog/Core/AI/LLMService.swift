@@ -1014,8 +1014,7 @@ final class LLMService: LLMServicing {
             let chatCLI = makeChatCLIProvider()
             return chatCLI.generateChatStreaming(prompt: prompt, sessionId: sessionId)
         default:
-            let runtime = MCPChatRuntime()
-            return runtime.generateChatStreaming(prompt: prompt, sessionId: sessionId)
+            return MCPChatRuntime.shared.generateChatStreaming(prompt: prompt, sessionId: sessionId)
         }
     }
 }

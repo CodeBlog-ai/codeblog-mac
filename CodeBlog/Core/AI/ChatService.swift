@@ -410,6 +410,15 @@ final class ChatService: ObservableObject {
                     let toolId = toolCallIDMap[callID] ?? currentToolId
                     let summary = toolResultSummary(output: result, exitCode: resolvedExitCode)
 
+                    // Add tool result to conversation history for context in future turns
+                    let toolHistoryEntry = buildToolHistoryEntry(
+                        toolName: command,
+                        result: result,
+                        isError: isError,
+                        exitCode: resolvedExitCode
+                    )
+                    conversationHistory.append((role: "system", content: toolHistoryEntry))
+
                     // Update the specific step within the tool message
                     if let msgId = currentToolMessageId,
                        let idx = messages.firstIndex(where: { $0.id == msgId }) {
@@ -716,6 +725,15 @@ final class ChatService: ObservableObject {
         - Never mention MCP, tool configuration, API keys, or setup details to the user. Just use the tools naturally.
         - If a tool call fails, try again or suggest an alternative action — do NOT tell the user to install or configure anything.
 
+        ## ERROR HANDLING (CRITICAL)
+
+        When a tool call fails (returns an error), you MUST:
+        1. NEVER retry the same tool with the same arguments — that will fail again
+        2. Read the error message carefully and take the appropriate corrective action
+        3. If the error says "Preview not found or expired", you MUST call preview_post again to generate a NEW preview before calling confirm_post
+        4. NEVER call confirm_post with an old/expired preview_id — always generate a fresh preview first
+        5. Tell the user what happened briefly and what you're doing to fix it
+
         \(mcpToolsSection())
 
         ## POSTING RULES
@@ -858,17 +876,37 @@ final class ChatService: ObservableObject {
     private func buildMCPToolsSection(_ tools: [MCPToolDefinition]) -> String {
         var output = "## TOOLS\n\n"
         output += "Below are live MCP tools discovered at runtime. Use them whenever relevant.\n\n"
+        output += "IMPORTANT: Always provide ALL required parameters when calling tools. Never call a tool with empty arguments if it has required parameters.\n\n"
         for tool in tools {
             output += "- \(tool.name): \(tool.description)\n"
-            if let propertyNames = tool.inputSchema["properties"]?.objectValue?.keys.sorted(),
-               !propertyNames.isEmpty {
-                output += "  Parameters: \(propertyNames.joined(separator: ", "))\n"
+            if let properties = tool.inputSchema["properties"]?.objectValue,
+               !properties.isEmpty {
+                let requiredParams = tool.inputSchema["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
+                let allParams = properties.keys.sorted()
+                
+                // Format parameters with (required) annotation
+                let paramDescriptions = allParams.map { param -> String in
+                    if requiredParams.contains(param) {
+                        return "\(param) (required)"
+                    } else {
+                        return param
+                    }
+                }
+                output += "  Parameters: \(paramDescriptions.joined(separator: ", "))\n"
             }
         }
         output += """
 
         When the user asks about coding sessions, use scan_sessions first.
-        When they want to create a post, use preview_post or auto_post with dry_run=true first for preview.
+        For read_session and analyze_session, you MUST provide both 'path' and 'source' parameters from the scan_sessions result.
+        
+        PUBLISHING WORKFLOW:
+        1. To generate a preview: call preview_post with mode='manual' (provide title+content) or mode='auto' (auto-generate)
+           - The 'mode' parameter is REQUIRED for preview_post. NEVER call preview_post with empty arguments.
+        2. After showing preview to user and they say "publish" or "发布": call confirm_post with the preview_id
+           - Do NOT call preview_post again — use confirm_post directly with the existing preview_id
+        3. If preview expired: regenerate with preview_post (mode='manual' or 'auto'), then confirm_post
+        
         Always confirm with the user before publishing.
         """
         return output
@@ -880,6 +918,17 @@ final class ChatService: ObservableObject {
 
         Use MCP tools to scan sessions, analyze content, and post to CodeBlog.
         Prefer scan_sessions -> read_session/analyze_session as your default workflow.
+        
+        IMPORTANT: For read_session and analyze_session, you MUST provide both 'path' and 'source' parameters.
+        - path: The full file path returned by scan_sessions (e.g., "/Users/.../session.jsonl")
+        - source: The source type returned by scan_sessions (e.g., "claude-code", "cursor", "codex")
+        Never call these tools with empty arguments.
+        
+        PUBLISHING WORKFLOW:
+        1. preview_post requires 'mode' parameter: 'manual', 'auto', or 'digest'. NEVER call with empty arguments.
+        2. When user says "publish" after seeing a preview, call confirm_post with the preview_id — do NOT call preview_post again.
+        3. If preview expired, regenerate with preview_post (with mode parameter), then confirm_post.
+        
         Always show complete preview before publish-related actions.
         """
     }
@@ -983,6 +1032,64 @@ final class ChatService: ObservableObject {
             return String(trimmed.prefix(80))
         }
         return "Completed (\(lines) results)"
+    }
+
+    /// Build a concise tool history entry for conversation context
+    /// Extracts key information like preview_id, post URLs, etc.
+    private func buildToolHistoryEntry(toolName: String, result: String, isError: Bool, exitCode: Int?) -> String {
+        var entry = "[Tool: \(toolName)]"
+        
+        if isError || (exitCode ?? 0) != 0 {
+            // For errors, include the error message (truncated)
+            let errorPreview = String(result.prefix(200))
+            entry += " ERROR: \(errorPreview)"
+            return entry
+        }
+        
+        // Extract key information based on tool type
+        switch toolName {
+        case "preview_post":
+            // Extract preview_id - this is critical for confirm_post
+            if let previewIdMatch = result.range(of: "pv_[a-zA-Z0-9_]+", options: .regularExpression) {
+                let previewId = String(result[previewIdMatch])
+                entry += " preview_id=\(previewId)"
+            }
+            // Extract title if present
+            if let titleRange = result.range(of: "\\*\\*Title:\\*\\* (.+)", options: .regularExpression),
+               let titleMatch = result[titleRange].split(separator: "**").last {
+                entry += " title=\"\(String(titleMatch).prefix(50))\""
+            }
+            entry += " (Preview generated successfully. Use confirm_post with the preview_id to publish.)"
+            
+        case "confirm_post":
+            // Extract post URL if present
+            if let urlMatch = result.range(of: "https://codeblog\\.ai/[^\\s]+", options: .regularExpression) {
+                let url = String(result[urlMatch])
+                entry += " Published: \(url)"
+            } else {
+                entry += " Published successfully"
+            }
+            
+        case "scan_sessions":
+            // Count sessions found
+            let sessionCount = result.components(separatedBy: "\"id\":").count - 1
+            entry += " Found \(sessionCount) session(s)"
+            
+        case "analyze_session", "read_session":
+            // Just note it completed
+            entry += " Completed"
+            
+        default:
+            // For other tools, include a brief summary
+            let lines = result.split(whereSeparator: \.isNewline).count
+            if lines <= 3 {
+                entry += " \(String(result.prefix(150)))"
+            } else {
+                entry += " (\(lines) lines of output)"
+            }
+        }
+        
+        return entry
     }
 
     // MARK: - Suggestions Parsing
