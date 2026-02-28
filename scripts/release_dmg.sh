@@ -68,24 +68,27 @@ fi
 echo "==> Creating DMG..."
 if command -v create-dmg &>/dev/null; then
   DMG_BG="$PROJECT_DIR/docs/assets/dmg-background.png"
-  BG_FLAG=""
+
+  # Background is 1600x800 @2x retina; window is displayed at @1x (800x400)
+  # Icon at left (200, 190), Applications link at right (600, 185)
+  CREATE_DMG_ARGS=(
+    --volname "$APP_NAME"
+    --window-pos 200 120
+    --window-size 800 400
+    --icon-size 120
+    --icon "$APP_NAME.app" 200 190
+    --hide-extension "$APP_NAME.app"
+    --app-drop-link 600 185
+    --no-internet-enable
+  )
+
   if [ -f "$DMG_BG" ]; then
-    BG_FLAG="--background $DMG_BG"
+    CREATE_DMG_ARGS+=(--background "$DMG_BG")
   fi
 
-  create-dmg \
-    --volname "$APP_NAME" \
-    --window-pos 200 120 \
-    --window-size 800 400 \
-    --icon-size 100 \
-    --icon "$APP_NAME.app" 200 190 \
-    --hide-extension "$APP_NAME.app" \
-    --app-drop-link 600 185 \
-    $BG_FLAG \
-    "$DMG_OUTPUT" \
-    "$APP_PATH"
+  create-dmg "${CREATE_DMG_ARGS[@]}" "$DMG_OUTPUT" "$APP_PATH"
 else
-  echo "create-dmg not found, creating simple DMG..."
+  echo "create-dmg not found. Install with: brew install create-dmg"
   hdiutil create -volname "$APP_NAME" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_OUTPUT"
 fi
 
