@@ -36,6 +36,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        #if DEBUG
+        Bundle(path: "/Applications/InjectionIII.app/Contents/Resources/macOSInjection.bundle")?.load()
+        #endif
+
         // Block termination by default; only specific flows enable it.
         AppDelegate.allowTermination = false
         applySavedDockIconPreference()
