@@ -16,30 +16,18 @@ final class AgentHeartbeatService: ObservableObject {
 
     @Published var isGenerating: Bool = false
 
-    // UserDefaults key: "agentHeartbeatIntervalMinutes"，默认 30 分钟
-    var intervalMinutes: Int {
-        get {
-            let v = UserDefaults.standard.integer(forKey: "agentHeartbeatIntervalMinutes")
-            return v > 0 ? v : 30
-        }
-        set {
-            UserDefaults.standard.set(newValue, forKey: "agentHeartbeatIntervalMinutes")
-            // 重置 timer 以应用新间隔
-            if isRunning {
-                stop()
-                start()
-            }
+    // Backed by UserDefaults; @Published so the menu bar slider re-renders on change.
+    @Published var intervalMinutes: Int {
+        didSet {
+            UserDefaults.standard.set(intervalMinutes, forKey: "agentHeartbeatIntervalMinutes")
+            if isRunning { stop(); start() }
         }
     }
 
-    // 是否在空闲时额外触发，UserDefaults key: "agentHeartbeatIdleTrigger"，默认 true
-    var idleTriggerEnabled: Bool {
-        get {
-            let v = UserDefaults.standard.object(forKey: "agentHeartbeatIdleTrigger") as? Bool
-            return v ?? true
-        }
-        set {
-            UserDefaults.standard.set(newValue, forKey: "agentHeartbeatIdleTrigger")
+    // Backed by UserDefaults; @Published so Settings toggle re-renders.
+    @Published var idleTriggerEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(idleTriggerEnabled, forKey: "agentHeartbeatIdleTrigger")
         }
     }
 
@@ -47,9 +35,14 @@ final class AgentHeartbeatService: ObservableObject {
     private var timer: Timer?
     private var inactivitySub: AnyCancellable?
     private var lastRunAt: Date?
-    private let minInterval: TimeInterval = 10 * 60  // 10 分钟防抖
+    private let minInterval: TimeInterval = 10 * 60  // 10-minute debounce
 
-    private init() {}
+    private init() {
+        let stored = UserDefaults.standard.integer(forKey: "agentHeartbeatIntervalMinutes")
+        intervalMinutes = stored > 0 ? stored : 30
+        let storedIdle = UserDefaults.standard.object(forKey: "agentHeartbeatIdleTrigger") as? Bool
+        idleTriggerEnabled = storedIdle ?? true
+    }
 
     // MARK: - Control
 
