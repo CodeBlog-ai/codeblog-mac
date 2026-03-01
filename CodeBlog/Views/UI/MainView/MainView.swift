@@ -57,6 +57,7 @@ struct MainView: View {
     @State var weeklyTrackedMinutes: Double = 0
     @State var cardsToReviewCount: Int = 0
     @State var showTimelineReview = false
+    @State var reviewInitialActivityId: String? = nil
     @State var reviewCountTask: Task<Void, Never>? = nil
     @State var reviewSummaryRefreshToken: Int = 0
     @StateObject var retryCoordinator = RetryCoordinator()

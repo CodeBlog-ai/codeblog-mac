@@ -103,7 +103,20 @@ struct ChatView: View {
         .onAppear {
             chatService.loadConversationsList()
             fetchCodeBlogCreditModel()
+            // Fire any card chat that was scheduled while this view wasn't yet mounted
+            // (e.g. the user tapped "Chat with Agent" from the timeline review overlay,
+            // which switches tab and posts the notification before ChatView exists).
+            chatService.fireCardTriggerIfNeeded()
             triggerPostOnboardingAutoMessageIfNeeded()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .injectAgentPostToChat)) { notification in
+            let title = notification.userInfo?["title"] as? String ?? ""
+            let content = notification.userInfo?["content"] as? String ?? ""
+            let type = notification.userInfo?["cardType"] as? String ?? "post"
+            // This fires if ChatView is already mounted (user was already on the agent tab).
+            // If the tab was switching when the notification was posted, Layout.swift's onReceive
+            // already called scheduleCardChat; fireCardTriggerIfNeeded() in onAppear will handle it.
+            chatService.openChatWithCard(title: title, content: content, type: type)
         }
         .alert("Switch model?", isPresented: $showToolSwitchConfirm) {
             Button("Switch and Reset", role: .destructive) {
@@ -202,8 +215,8 @@ struct ChatView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 16) {
-                        // Welcome message if empty
-                        if chatService.messages.isEmpty {
+                        // Welcome message if empty and not processing
+                        if chatService.messages.isEmpty && !chatService.isProcessing {
                             welcomeView
                         }
 

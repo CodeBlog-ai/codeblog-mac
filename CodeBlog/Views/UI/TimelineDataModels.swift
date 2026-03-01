@@ -10,7 +10,7 @@ import SwiftUI
 
 
 /// Represents an activity in the timeline view
-struct TimelineActivity: Identifiable {
+struct TimelineActivity: Identifiable, Equatable {
     let id: String
     let recordId: Int64?
     let batchId: Int64? // Tracks source batch for retry functionality
@@ -26,6 +26,12 @@ struct TimelineActivity: Identifiable {
     let screenshot: NSImage?
     let appSites: AppSites?
     let isBackupGenerated: Bool?
+    let agentCardType: String?   // "journal" | "insight" | "post" — nil means normal activity card
+    let previewId: String?       // MCP preview_post returned preview_id, used for confirm_post
+
+    static func == (lhs: TimelineActivity, rhs: TimelineActivity) -> Bool {
+        lhs.id == rhs.id
+    }
 
     static func stableId(recordId: Int64?, batchId: Int64?, startTime: Date, endTime: Date, title: String, category: String, subcategory: String) -> String {
         if let recordId {
@@ -62,7 +68,9 @@ struct TimelineActivity: Identifiable {
             videoSummaryURL: videoSummaryURL,
             screenshot: screenshot,
             appSites: appSites,
-            isBackupGenerated: isBackupGenerated
+            isBackupGenerated: isBackupGenerated,
+            agentCardType: agentCardType,
+            previewId: previewId
         )
     }
 
@@ -82,7 +90,9 @@ struct TimelineActivity: Identifiable {
             videoSummaryURL: newVideoSummaryURL,
             screenshot: screenshot,
             appSites: appSites,
-            isBackupGenerated: isBackupGenerated
+            isBackupGenerated: isBackupGenerated,
+            agentCardType: agentCardType,
+            previewId: previewId
         )
     }
 }

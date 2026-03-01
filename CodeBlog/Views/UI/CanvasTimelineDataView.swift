@@ -253,44 +253,75 @@ struct CanvasTimelineDataView: View {
                     .pointingHandCursor(enabled: selectedCardId != nil || selectedActivity != nil)
                 ForEach(Array(positionedActivities.enumerated()), id: \.element.id) { index, item in
                     let isVisible = cardEntranceProgress[item.id] ?? false
-                    CanvasActivityCard(
-                        title: item.title,
-                        time: item.timeLabel,
-                        height: item.height,
-                        durationMinutes: item.durationMinutes,
-                        style: style(for: item.categoryName),
-                        isSelected: selectedCardId == item.id,
-                        isSystemCategory: item.categoryName.trimmingCharacters(in: .whitespacesAndNewlines)
-                            .caseInsensitiveCompare("System") == .orderedSame,
-                        isBackupGenerated: item.activity.isBackupGenerated == true,
-                        onTap: {
-                            if selectedCardId == item.id {
-                                clearSelection()
-                            } else {
-                                selectedCardId = item.id
-                                selectedActivity = item.activity
+                    let isAgent = item.categoryName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .caseInsensitiveCompare("Agent") == .orderedSame
+
+                    if isAgent {
+                        // Agent card: fixed pill aligned to the slot's start-time hour line.
+                        // .position sets the view center, so y = yPosition + halfHeight places
+                        // the top edge exactly on the hour line for the card's start time.
+                        let agentCardH: CGFloat = 30
+                        CanvasAgentCard(
+                            title: item.title,
+                            agentCardType: item.activity.agentCardType ?? "journal",
+                            isSelected: selectedCardId == item.id,
+                            onTap: {
+                                if selectedCardId == item.id {
+                                    clearSelection()
+                                } else {
+                                    selectedCardId = item.id
+                                    selectedActivity = item.activity
+                                }
                             }
-                        },
-                        faviconPrimaryRaw: item.faviconPrimaryRaw,
-                        faviconSecondaryRaw: item.faviconSecondaryRaw,
-                        faviconPrimaryHost: item.faviconPrimaryHost,
-                        faviconSecondaryHost: item.faviconSecondaryHost,
-                        statusLine: retryCoordinator.statusLine(for: item.activity.batchId)
-                    )
-                    .frame(width: geo.size.width, height: item.height)
-                    .position(x: geo.size.width / 2, y: item.yPosition + (item.height / 2))
-                    // Staggered entrance animation (Emil Kowalski: sequential reveal creates polish)
-                    .opacity(isVisible ? 1 : 0)
-                    .offset(x: isVisible ? 0 : 12)
-                    .animation(
-                        .spring(response: 0.35, dampingFraction: 0.8)
-                            .delay(Double(index) * 0.03), // 30ms stagger between cards
-                        value: isVisible
-                    )
+                        )
+                        .frame(width: geo.size.width - 12, height: agentCardH)
+                        .position(x: geo.size.width / 2, y: item.yPosition + agentCardH / 2)
+                        .opacity(isVisible ? 1 : 0)
+                        .offset(x: isVisible ? 0 : 12)
+                        .animation(
+                            .spring(response: 0.35, dampingFraction: 0.8)
+                                .delay(Double(index) * 0.03),
+                            value: isVisible
+                        )
+                    } else {
+                        CanvasActivityCard(
+                            title: item.title,
+                            time: item.timeLabel,
+                            height: item.height,
+                            durationMinutes: item.durationMinutes,
+                            style: style(for: item.categoryName, agentCardType: nil),
+                            isSelected: selectedCardId == item.id,
+                            isSystemCategory: item.categoryName.trimmingCharacters(in: .whitespacesAndNewlines)
+                                .caseInsensitiveCompare("System") == .orderedSame,
+                            isBackupGenerated: item.activity.isBackupGenerated == true,
+                            onTap: {
+                                if selectedCardId == item.id {
+                                    clearSelection()
+                                } else {
+                                    selectedCardId = item.id
+                                    selectedActivity = item.activity
+                                }
+                            },
+                            faviconPrimaryRaw: item.faviconPrimaryRaw,
+                            faviconSecondaryRaw: item.faviconSecondaryRaw,
+                            faviconPrimaryHost: item.faviconPrimaryHost,
+                            faviconSecondaryHost: item.faviconSecondaryHost,
+                            statusLine: retryCoordinator.statusLine(for: item.activity.batchId)
+                        )
+                        .frame(width: geo.size.width, height: item.height)
+                        .position(x: geo.size.width / 2, y: item.yPosition + (item.height / 2))
+                        .opacity(isVisible ? 1 : 0)
+                        .offset(x: isVisible ? 0 : 12)
+                        .animation(
+                            .spring(response: 0.35, dampingFraction: 0.8)
+                                .delay(Double(index) * 0.03),
+                            value: isVisible
+                        )
+                    }
                 }
             }
         }
-        .clipped() // Prevent shadows/animations from affecting scroll geometry
+        .clipped()
         .frame(minWidth: 0, maxWidth: .infinity)
     }
 
@@ -680,7 +711,9 @@ struct CanvasTimelineDataView: View {
                 videoSummaryURL: card.videoSummaryURL,
                 screenshot: nil,
                 appSites: card.appSites,
-                isBackupGenerated: card.isBackupGenerated
+                isBackupGenerated: card.isBackupGenerated,
+                agentCardType: card.agentCardType,
+                previewId: card.previewId
             ))
         }
 
@@ -696,18 +729,26 @@ struct CanvasTimelineDataView: View {
     }
 
     private nonisolated func resolveOverlapsForDisplay(_ activities: [TimelineActivity]) -> [DisplaySegment] {
+        // Agent cards are displayed independently — exclude them from overlap resolution
+        let agentActivities = activities.filter {
+            $0.category.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare("Agent") == .orderedSame
+        }
+        let regularActivities = activities.filter {
+            $0.category.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare("Agent") != .orderedSame
+        }
+
         // Start with raw segments mirroring activity times
-        var segments = activities.map { DisplaySegment(activity: $0, start: $0.startTime, end: $0.endTime) }
-        guard segments.count > 1 else { return segments }
+        var segments = regularActivities.map { DisplaySegment(activity: $0, start: $0.startTime, end: $0.endTime) }
 
-        // Sort by start time for deterministic processing
-        segments.sort { $0.start < $1.start }
+        if segments.count > 1 {
+            // Sort by start time for deterministic processing
+            segments.sort { $0.start < $1.start }
 
-        // Iteratively resolve overlaps until stable, with a safety cap
-        var changed = true
-        var passes = 0
-        let maxPasses = 8
-        while changed && passes < maxPasses {
+            // Iteratively resolve overlaps until stable, with a safety cap
+            var changed = true
+            var passes = 0
+            let maxPasses = 8
+            while changed && passes < maxPasses {
             changed = false
             passes += 1
 
@@ -777,8 +818,11 @@ struct CanvasTimelineDataView: View {
                 i += 1
             }
         }
+        } // end if segments.count > 1
 
-        return segments
+        // Append Agent cards unchanged (they display independently, no overlap trimming)
+        let agentSegments = agentActivities.map { DisplaySegment(activity: $0, start: $0.startTime, end: $0.endTime) }
+        return segments + agentSegments
     }
 
     private func recordingProjectionHeight(for projection: RecordingProjectionWindow) -> CGFloat {
@@ -901,8 +945,33 @@ struct CanvasTimelineDataView: View {
     }
 
 
-    private func style(for rawCategory: String) -> CanvasActivityCardStyle {
+    private func style(for rawCategory: String, agentCardType: String? = nil) -> CanvasActivityCardStyle {
         let normalized = rawCategory.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        // Agent cards — bypass category store, use fixed design system colors
+        if normalized == "agent", let type = agentCardType {
+            switch type {
+            case "insight", "post":
+                return CanvasActivityCardStyle(
+                    text: Color.black.opacity(0.9),
+                    time: Color.black.opacity(0.7),
+                    accent: Color(hex: "F96E00"),
+                    isIdle: false,
+                    backgroundColor: Color(hex: "FFF4E9"),
+                    agentCardType: type
+                )
+            default: // "journal"
+                return CanvasActivityCardStyle(
+                    text: Color.black.opacity(0.9),
+                    time: Color.black.opacity(0.7),
+                    accent: Color(hex: "9B7753"),
+                    isIdle: false,
+                    backgroundColor: Color(hex: "FFFBF8"),
+                    agentCardType: type
+                )
+            }
+        }
+
         let categories = categoryStore.categories
         let matched = categories.first { $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalized }
         let fallback = categories.first ?? CategoryPersistence.defaultCategories.first!
@@ -954,6 +1023,8 @@ struct CanvasActivityCardStyle {
     let time: Color
     let accent: Color
     let isIdle: Bool
+    var backgroundColor: Color = Color(hex: "FFFBF8")
+    var agentCardType: String? = nil
 }
 
 struct CanvasActivityCard: View {
@@ -983,6 +1054,24 @@ struct CanvasActivityCard: View {
 
     private var isCompactCard: Bool {
         durationMinutes < 13
+    }
+
+    // Agent card — 根据类型返回 emoji 前缀
+    private var agentTimePrefix: String? {
+        guard let type = style.agentCardType else { return nil }
+        switch type {
+        case "insight": return "💡 ·"
+        case "post":    return "✦ 待发布 ·"
+        default:        return "📝 ·"   // journal
+        }
+    }
+
+    // 实际显示的 time 字符串（Agent card 带前缀）
+    private var displayTime: String {
+        if let prefix = agentTimePrefix {
+            return "\(prefix) \(time)"
+        }
+        return time
     }
 
     private var backupIndicator: some View {
@@ -1038,7 +1127,7 @@ struct CanvasActivityCard: View {
 
                                 Spacer()
 
-                                Text(time)
+                                Text(displayTime)
                                     .font(
                                         Font.custom("Nunito", size: 10)
                                             .weight(.medium)
@@ -1081,7 +1170,7 @@ struct CanvasActivityCard: View {
                                 backupIndicator
                             }
 
-                            Text(time)
+                            Text(displayTime)
                                 .font(
                                     Font.custom("Nunito", size: 10)
                                         .weight(.medium)
@@ -1101,7 +1190,7 @@ struct CanvasActivityCard: View {
                 maxHeight: height,
                 alignment: isCompactCard ? .leading : .topLeading
             )
-            .background(isFailedCard ? Color(hex: "FFECE4") : Color(hex: "FFFBF8"))
+            .background(isFailedCard ? Color(hex: "FFECE4") : style.backgroundColor)
             .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 2, style: .continuous)
@@ -1147,6 +1236,106 @@ struct CanvasCardButtonStyle: ButtonStyle {
                 .spring(response: 0.3, dampingFraction: 0.6),
                 value: configuration.isPressed
             )
+    }
+}
+
+
+// MARK: - Agent Card (compact pill overlay)
+
+struct CanvasAgentCard: View {
+    let title: String
+    let agentCardType: String   // "journal" | "insight" | "post"
+    let isSelected: Bool
+    let onTap: () -> Void
+
+    @State private var shimmerPhase: CGFloat = 0
+
+    private var emoji: String {
+        switch agentCardType {
+        case "insight": return "💡"
+        case "post":    return "✦"
+        default:        return "📝"
+        }
+    }
+
+    // 三种类型各自的渐变，都好看有区分度
+    private var agentGradient: LinearGradient {
+        switch agentCardType {
+        case "insight":
+            // 💡 蓝紫 → 橙金
+            return LinearGradient(
+                stops: [
+                    .init(color: Color(hex: "6B8FD4"), location: 0.00),
+                    .init(color: Color(hex: "C47FD0"), location: 0.45),
+                    .init(color: Color(hex: "F9A24B"), location: 1.00)
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        case "post":
+            // ✦ 深橙 → 玫瑰金
+            return LinearGradient(
+                stops: [
+                    .init(color: Color(hex: "F96E00"), location: 0.00),
+                    .init(color: Color(hex: "E8517A"), location: 0.50),
+                    .init(color: Color(hex: "FFB199"), location: 1.00)
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        default:
+            // 📝 journal — 和 Generating 相同的彩虹渐变
+            return LinearGradient(
+                stops: [
+                    .init(color: Color(hex: "5E7FC0"), location: 0.00),
+                    .init(color: Color(hex: "D88ECE"), location: 0.35),
+                    .init(color: Color(hex: "FFC19E"), location: 0.68),
+                    .init(color: Color(hex: "FFEDE0"), location: 1.00)
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        }
+    }
+
+    var body: some View {
+        Button(action: {
+            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) { onTap() }
+        }) {
+            HStack(spacing: 6) {
+                Text(emoji)
+                    .font(.system(size: 11))
+                Text(title)
+                    .font(Font.custom("Nunito", size: 12).weight(.semibold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(agentGradient)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .inset(by: 0.375)
+                    .stroke(
+                        isSelected ? Color.white.opacity(0.9) : Color.white.opacity(0.52),
+                        lineWidth: isSelected ? 1.5 : 0.75
+                    )
+            )
+            .shadow(
+                color: isSelected ? Color(hex: "D88ECE").opacity(0.45) : Color.black.opacity(0.10),
+                radius: isSelected ? 8 : 4,
+                y: 1
+            )
+        }
+        .buttonStyle(CanvasCardButtonStyle())
+        .pointingHandCursor()
+        .padding(.horizontal, 6)
     }
 }
 

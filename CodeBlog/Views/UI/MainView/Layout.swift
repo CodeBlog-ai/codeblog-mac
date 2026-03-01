@@ -4,13 +4,26 @@ import Sentry
 
 extension MainView {
     var mainLayout: some View {
+        mainLayoutWithLifecycleEvents(mainLayoutScaffold)
+    }
+
+    private var mainLayoutScaffold: some View {
         contentStack
             .padding([.top, .trailing, .bottom], 15)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.clear)
             .ignoresSafeArea()
-            // Hero animation overlay for video expansion (Emil Kowalski: shared element transitions)
+            // Agent card taps → open timeline review at that card
+            .onChange(of: selectedActivity) { _, newActivity in
+                guard let activity = newActivity, activity.agentCardType != nil else { return }
+                reviewInitialActivityId = activity.id
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                    showTimelineReview = true
+                }
+                selectedActivity = nil
+            }
+            // Hero animation overlay for video expansion
             .overlay { overlayContent }
             .overlay(alignment: .bottomTrailing) {
                 if let payload = timelineFailureToastPayload {
@@ -36,6 +49,10 @@ extension MainView {
                     isPresented: $showDatePicker
                 )
             }
+    }
+
+    private func mainLayoutWithLifecycleEvents<Content: View>(_ content: Content) -> some View {
+        content
             .onAppear {
                 if isFirstLaunchAfterOnboarding {
                     selectedIcon = .agent
@@ -150,6 +167,37 @@ extension MainView {
             .onReceive(NotificationCenter.default.publisher(for: .navigateToJournal)) { _ in
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) {
                     selectedIcon = .journal
+                }
+            }
+            // Handle "Open Timeline" from menu bar
+            .onReceive(NotificationCenter.default.publisher(for: .navigateToTimeline)) { _ in
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) {
+                    selectedIcon = .timeline
+                }
+            }
+            // Handle navigation from Agent heartbeat notification tap
+            .onReceive(NotificationCenter.default.publisher(for: .navigateToAgentPost)) { notification in
+                let previewId = notification.userInfo?["previewId"] as? String ?? ""
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) {
+                    selectedIcon = .timeline
+                    selectedDate = Date()
+                }
+                // 触发 timeline 刷新；previewId 留给未来精准定位使用
+                refreshActivitiesTrigger &+= 1
+                print("[Layout] navigateToAgentPost previewId=\(previewId)")
+            }
+            // Handle inject agent post to chat
+            .onReceive(NotificationCenter.default.publisher(for: .injectAgentPostToChat)) { notification in
+                let title = notification.userInfo?["title"] as? String ?? ""
+                let content = notification.userInfo?["content"] as? String ?? ""
+                let type = notification.userInfo?["cardType"] as? String ?? "post"
+                // Schedule the card chat on the service first, before the tab switch.
+                // If ChatView isn't mounted yet (coming from timeline tab), its onAppear
+                // will call fireCardTriggerIfNeeded() once it's live.
+                ChatService.shared.scheduleCardChat(title: title, content: content, type: type)
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) {
+                    showTimelineReview = false
+                    selectedIcon = .agent
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .showTimelineFailureToast)) { notification in
@@ -510,45 +558,46 @@ extension MainView {
             Color.white.opacity(0.7)
 
             if let activity = selectedActivity {
+                // Agent cards are routed to agentCardOverlay via onChange — only regular cards reach here
                 // Show activity details when a card is selected
-                ZStack(alignment: .bottom) {
-                    ActivityCard(
-                        activity: activity,
-                        maxHeight: geo.size.height,
-                        scrollSummary: true,
-                        hasAnyActivities: hasAnyActivities,
-                        onCategoryChange: { category, activity in
-                            handleCategoryChange(to: category, for: activity)
-                        },
-                        onNavigateToCategoryEditor: {
-                            showCategoryEditor = true
-                        },
-                        onRetryBatchCompleted: { batchId in
-                            refreshActivitiesTrigger &+= 1
-                            if selectedActivity?.batchId == batchId {
-                                selectedActivity = nil
+                    ZStack(alignment: .bottom) {
+                        ActivityCard(
+                            activity: activity,
+                            maxHeight: geo.size.height,
+                            scrollSummary: true,
+                            hasAnyActivities: hasAnyActivities,
+                            onCategoryChange: { category, activity in
+                                handleCategoryChange(to: category, for: activity)
+                            },
+                            onNavigateToCategoryEditor: {
+                                showCategoryEditor = true
+                            },
+                            onRetryBatchCompleted: { batchId in
+                                refreshActivitiesTrigger &+= 1
+                                if selectedActivity?.batchId == batchId {
+                                    selectedActivity = nil
+                                }
                             }
-                        }
-                    )
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .allowsHitTesting(!feedbackModalVisible)
-                    .padding(.bottom, rateSummaryFooterHeight)
-
-                    if !feedbackModalVisible {
-                        TimelineRateSummaryView(
-                            activityID: activity.id,
-                            onRate: handleTimelineRating
                         )
-                        .frame(maxWidth: .infinity)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .allowsHitTesting(!feedbackModalVisible)
-                        .transition(
-                            .move(edge: .bottom)
-                                .combined(with: .opacity)
-                        )
+                        .padding(.bottom, rateSummaryFooterHeight)
+
+                        if !feedbackModalVisible {
+                            TimelineRateSummaryView(
+                                activityID: activity.id,
+                                onRate: handleTimelineRating
+                            )
+                            .frame(maxWidth: .infinity)
+                            .allowsHitTesting(!feedbackModalVisible)
+                            .transition(
+                                .move(edge: .bottom)
+                                    .combined(with: .opacity)
+                            )
+                        }
                     }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
             } else {
                 DaySummaryView(
                     selectedDate: selectedDate,
@@ -614,7 +663,8 @@ extension MainView {
             if selectedIcon == .timeline, showTimelineReview {
                 TimelineReviewOverlay(
                     isPresented: $showTimelineReview,
-                    selectedDate: selectedDate
+                    selectedDate: selectedDate,
+                    initialActivityId: reviewInitialActivityId
                 ) {
                     updateCardsToReviewCount()
                     reviewSummaryRefreshToken &+= 1

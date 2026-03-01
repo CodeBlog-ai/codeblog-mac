@@ -110,6 +110,7 @@ private enum TimelineReviewInput: String {
 struct TimelineReviewOverlay: View {
     @Binding var isPresented: Bool
     let selectedDate: Date
+    var initialActivityId: String? = nil   // 点具体卡片时定位到该卡
     var onDismiss: (() -> Void)? = nil
 
     @EnvironmentObject private var categoryStore: CategoryStore
@@ -129,6 +130,10 @@ struct TimelineReviewOverlay: View {
     @State private var lastTrackpadDelta: CGSize = .zero
     @State private var isPointerOverSummary = false
     @State private var playbackToggleToken = 0
+    @State private var isPublishingPost = false
+    @State private var publishToastMessage: String? = nil
+    @State private var publishToastIsSuccess = false
+    @State private var publishToastToken = 0
     @State private var lastCloseSource: TimelineReviewInput? = nil
 
     @State private var cardSize = CGSize(width: 340, height: 440)
@@ -163,6 +168,27 @@ struct TimelineReviewOverlay: View {
             }
 
             closeButton
+
+            // Publish toast
+            if let message = publishToastMessage {
+                VStack {
+                    HStack(spacing: 8) {
+                        Image(systemName: publishToastIsSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundColor(publishToastIsSuccess ? Color(hex: "2EA07D") : Color(hex: "E8517A"))
+                        Text(message)
+                            .font(.custom("Nunito", size: 13).weight(.medium))
+                            .foregroundColor(Color(hex: "333333"))
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Color.white.opacity(0.95))
+                    .clipShape(Capsule())
+                    .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+                    Spacer()
+                }
+                .padding(.top, 60)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .transition(.opacity)
@@ -287,7 +313,9 @@ struct TimelineReviewOverlay: View {
                                     if isActive {
                                         isPointerOverSummary = hovering
                                     }
-                                }
+                                },
+                                onPublishPost: isActive ? { handlePublishPost(activity: activity) } : nil,
+                                onChatAboutPost: isActive ? { handleChatAboutPost(activity: activity) } : nil
                             )
                             .frame(width: computedCardSize.width, height: computedCardSize.height)
 
@@ -646,6 +674,58 @@ struct TimelineReviewOverlay: View {
         onDismiss?()
     }
 
+    private func handlePublishPost(activity: TimelineActivity) {
+        guard let previewId = activity.previewId, !previewId.isEmpty else {
+            showPublishToast(message: "Invalid preview ID", success: false)
+            return
+        }
+        guard !isPublishingPost else { return }
+        isPublishingPost = true
+        Task { @MainActor in
+            do {
+                let result = try await MCPStdioClient.shared.callTool(
+                    name: "confirm_post",
+                    arguments: ["preview_id": .string(previewId)]
+                )
+                isPublishingPost = false
+                if result.isError {
+                    showPublishToast(message: "Failed to publish: \(result.text.prefix(60))", success: false)
+                } else {
+                    showPublishToast(message: "Published!", success: true)
+                }
+            } catch {
+                isPublishingPost = false
+                showPublishToast(message: "Failed to publish: \(error.localizedDescription)", success: false)
+            }
+        }
+    }
+
+    private func handleChatAboutPost(activity: TimelineActivity) {
+        NotificationCenter.default.post(
+            name: .injectAgentPostToChat,
+            object: nil,
+            userInfo: [
+                "title": activity.title,
+                "content": activity.detailedSummary.isEmpty ? activity.summary : activity.detailedSummary,
+                "cardType": activity.agentCardType ?? "post",
+                "previewId": activity.previewId as Any
+            ]
+        )
+        dismissOverlay()
+    }
+
+    private func showPublishToast(message: String, success: Bool) {
+        publishToastToken += 1
+        let token = publishToastToken
+        publishToastMessage = message
+        publishToastIsSuccess = success
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            // 只有当前 token 还匹配时才清除，避免旧计时器清掉新 toast
+            guard publishToastToken == token else { return }
+            publishToastMessage = nil
+        }
+    }
+
     private func loadActivities() {
         isLoading = true
         let timelineDate = timelineDisplayDate(from: selectedDate)
@@ -656,7 +736,10 @@ struct TimelineReviewOverlay: View {
         Task.detached(priority: .userInitiated) {
             let cards = StorageManager.shared.fetchTimelineCards(forDay: dayString)
             let activities = makeTimelineActivities(from: cards, for: timelineDate)
-                .filter { $0.category.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare("System") != .orderedSame }
+                .filter {
+                    $0.category.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .caseInsensitiveCompare("System") != .orderedSame
+                }
                 .sorted { $0.startTime < $1.startTime }
             let ratingSegments = StorageManager.shared.fetchReviewRatingSegments(overlapping: dayStartTs, endTs: dayEndTs)
             let summary = Self.makeRatingSummary(
@@ -672,7 +755,13 @@ struct TimelineReviewOverlay: View {
             )
             await MainActor.run {
                 self.activities = reviewActivities
-                self.currentIndex = 0
+                // 如果指定了 initialActivityId，定位到对应卡片，否则从第一张开始
+                if let targetId = self.initialActivityId,
+                   let idx = reviewActivities.firstIndex(where: { $0.id == targetId }) {
+                    self.currentIndex = idx
+                } else {
+                    self.currentIndex = 0
+                }
                 self.ratings = [:]
                 self.isPointerOverSummary = false
                 self.hasAnyActivities = activities.isEmpty == false
@@ -727,6 +816,9 @@ struct TimelineReviewOverlay: View {
         var end: Int
     }
 
+    /// 与 StorageManager.fetchUnreviewedTimelineCardCount 保持一致
+    private static let reviewCoverageThreshold: Double = 0.8
+
     nonisolated private static func filterUnreviewedActivities(
         activities: [TimelineActivity],
         ratingSegments: [TimelineReviewRatingSegment],
@@ -756,7 +848,7 @@ struct TimelineReviewOverlay: View {
                 segmentIndex: &segmentIndex
             )
             let coverageRatio = Double(covered) / Double(duration)
-            if coverageRatio < 0.8 {
+            if coverageRatio < Self.reviewCoverageThreshold {
                 unreviewed.append(activity)
             }
         }
@@ -837,6 +929,8 @@ private struct TimelineReviewCard: View {
     let isActive: Bool
     let playbackToggleToken: Int
     let onSummaryHover: (Bool) -> Void
+    var onPublishPost: (() -> Void)? = nil
+    var onChatAboutPost: (() -> Void)? = nil
 
     @StateObject private var playerModel: TimelineReviewPlayerModel
     @State private var isHoveringMedia = false
@@ -850,7 +944,9 @@ private struct TimelineReviewCard: View {
         highlightOpacity: Double,
         isActive: Bool,
         playbackToggleToken: Int,
-        onSummaryHover: @escaping (Bool) -> Void
+        onSummaryHover: @escaping (Bool) -> Void,
+        onPublishPost: (() -> Void)? = nil,
+        onChatAboutPost: (() -> Void)? = nil
     ) {
         self.activity = activity
         self.categoryColor = categoryColor
@@ -860,6 +956,8 @@ private struct TimelineReviewCard: View {
         self.isActive = isActive
         self.playbackToggleToken = playbackToggleToken
         self.onSummaryHover = onSummaryHover
+        self.onPublishPost = onPublishPost
+        self.onChatAboutPost = onChatAboutPost
         _playerModel = StateObject(wrappedValue: TimelineReviewPlayerModel(activity: activity))
     }
 
@@ -872,6 +970,9 @@ private struct TimelineReviewCard: View {
             VStack(spacing: 0) {
                 TimelineReviewCardMedia(
                     image: playerModel.currentImage,
+                    agentCardType: activity.agentCardType,
+                    cardId: activity.id,
+                    title: activity.title,
                     onTogglePlayback: {
                         guard isActive else { return }
                         togglePlayback()
@@ -879,19 +980,21 @@ private struct TimelineReviewCard: View {
                 )
                 .frame(height: Design.mediaHeight)
                 .overlay(alignment: .bottom) {
-                    TimelineReviewPlaybackTimeline(
-                        progress: playbackProgress,
-                        timeText: playbackTimeText,
-                        mediaHeight: Design.mediaHeight,
-                        lineHeight: Design.progressLineHeight,
-                        isInteractive: isActive,
-                        onScrubStart: beginScrub,
-                        onScrubChange: updateScrub(progress:),
-                        onScrubEnd: endScrub
-                    )
+                    if activity.agentCardType == nil {
+                        TimelineReviewPlaybackTimeline(
+                            progress: playbackProgress,
+                            timeText: playbackTimeText,
+                            mediaHeight: Design.mediaHeight,
+                            lineHeight: Design.progressLineHeight,
+                            isInteractive: isActive,
+                            onScrubStart: beginScrub,
+                            onScrubChange: updateScrub(progress:),
+                            onScrubEnd: endScrub
+                        )
+                    }
                 }
                 .overlay(alignment: .bottomTrailing) {
-                    if isHoveringMedia && isActive {
+                    if isHoveringMedia && isActive && activity.agentCardType == nil {
                         speedChip
                             .padding(SpeedChipDesign.padding)
                             .zIndex(2)
@@ -929,7 +1032,13 @@ private struct TimelineReviewCard: View {
                     }
 
                     HStack {
-                        Spacer()
+                        // Post 卡：发布 + 聊天按钮
+                        if activity.agentCardType?.lowercased() == "post" {
+                            postActionButtons
+                            Spacer()
+                        } else {
+                            Spacer()
+                        }
                         Text(progressText)
                             .font(.custom("Nunito", size: 10).weight(.medium))
                             .foregroundColor(Color(hex: "AFAFAF"))
@@ -965,6 +1074,48 @@ private struct TimelineReviewCard: View {
 
     private var summaryText: String {
         activity.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @ViewBuilder
+    private var postActionButtons: some View {
+        HStack(spacing: 6) {
+            Button {
+                onPublishPost?()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "paperplane.fill")
+                        .font(.system(size: 10))
+                    Text("Publish")
+                        .font(.custom("Nunito", size: 12).weight(.semibold))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color(hex: "F96E00"))
+                .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .pointingHandCursor()
+
+            Button {
+                onChatAboutPost?()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "bubble.left.and.bubble.right")
+                        .font(.system(size: 10))
+                    Text("Chat with Agent")
+                        .font(.custom("Nunito", size: 12).weight(.medium))
+                }
+                .foregroundColor(Color(hex: "F96E00"))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color(hex: "FFF4E9"))
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(Color(hex: "F96E00").opacity(0.3), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .pointingHandCursor()
+        }
     }
 
     private var timeRangeText: String {
@@ -1435,6 +1586,9 @@ private final class TimelineReviewFrameLoader: @unchecked Sendable {
 
 private struct TimelineReviewCardMedia: View {
     let image: NSImage?
+    let agentCardType: String?
+    let cardId: String
+    let title: String
     let onTogglePlayback: () -> Void
 
     private enum Design {
@@ -1443,7 +1597,13 @@ private struct TimelineReviewCardMedia: View {
 
     var body: some View {
         ZStack {
-            if let image {
+            if let agentCardType, agentCardType.isEmpty == false {
+                AgentCardCover(
+                    cardId: cardId,
+                    type: AgentCardType.from(agentCardType),
+                    title: title
+                )
+            } else if let image {
                 TimelineReviewLayerBackedImageView(image: image)
                     .allowsHitTesting(false)
                     .clipped()
@@ -2210,7 +2370,9 @@ private func makeTimelineActivities(from cards: [TimelineCard], for date: Date) 
             videoSummaryURL: card.videoSummaryURL,
             screenshot: nil,
             appSites: card.appSites,
-            isBackupGenerated: card.isBackupGenerated
+            isBackupGenerated: card.isBackupGenerated,
+            agentCardType: card.agentCardType,
+            previewId: card.previewId
         ))
     }
 

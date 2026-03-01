@@ -22,6 +22,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBar: StatusBarController!
     private var recorder : ScreenRecorder!
     private var analyticsSub: AnyCancellable?
+    private var heartbeatRecordingSub: AnyCancellable?
     private var powerObserver: NSObjectProtocol?
     private var deepLinkRouter: AppDeepLinkRouter?
     private var pendingDeepLinkURLs: [URL] = []
@@ -159,6 +160,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 AnalyticsService.shared.capture("recording_toggled", ["enabled": enabled, "reason": reason])
                 AnalyticsService.shared.setPersonProperties(["recording_enabled": enabled])
             }
+
+        // Bind Record toggle → AgentHeartbeatService
+        heartbeatRecordingSub = AppState.shared.$isRecording
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] enabled in
+                guard self != nil else { return }
+                Task { @MainActor in
+                    if enabled {
+                        AgentHeartbeatService.shared.start()
+                    } else {
+                        AgentHeartbeatService.shared.stop()
+                    }
+                }
+            }
+
+        // Start AgentHeartbeatService if recording is already on
+        if AppState.shared.isRecording {
+            AgentHeartbeatService.shared.start()
+        }
+
+        // Sync AI provider config to web on startup (fire-and-forget)
+        if CodeBlogTokenResolver.currentToken() != nil {
+            Task {
+                try? await AIProviderSyncService.shared.pushToWeb()
+            }
+        }
 
         powerObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.willPowerOffNotification,

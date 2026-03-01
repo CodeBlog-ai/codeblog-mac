@@ -149,6 +149,13 @@ final class ChatService: ObservableObject {
     private let storage = ChatStorageManager.shared
     private var cachedMCPToolsSection: String?
     private var lastMCPToolsRefreshAt: Date?
+    // Card context injected when navigating from an Agent card.
+    // Consumed once by buildSystemPrompt, then cleared.
+    var pendingCardContext: (title: String, content: String, type: String)? = nil
+
+    // When set, ChatView.onAppear should call fireCardTrigger() to start the conversation.
+    // Using a separate "ready to fire" flag decouples the tab-switch timing from processConversation.
+    @Published private(set) var pendingCardTrigger: (title: String, content: String, type: String)? = nil
 
     // MARK: - Debug Logging
 
@@ -826,7 +833,76 @@ final class ChatService: ObservableObject {
         - NEVER suggest actions like "Read post X", "Open session Y", "View that post" — these require specific IDs you won't have
         - GOOD: "Show trending posts this week", "Scan my recent sessions", "What's popular in Swift?"
         - BAD: "Read that post", "Look at the OpenClaw article", "Analyze that session" (requires specific ID/path)
+        \(cardContextSection())
         """
+    }
+
+    private func cardContextSection() -> String {
+        guard let ctx = pendingCardContext else { return "" }
+        let typeLabel: String
+        switch ctx.type.lowercased() {
+        case "post":    typeLabel = "post draft"
+        case "insight": typeLabel = "insight note"
+        case "journal": typeLabel = "journal entry"
+        default:        typeLabel = "card"
+        }
+        return """
+
+        ## CURRENT CONTEXT
+
+        The user just opened this conversation from a \(typeLabel) their agent generated.
+        Do NOT wait for the user to explain — you already have this context.
+        Start the conversation naturally: briefly acknowledge what you see in the card,
+        say something genuine about it, and ask one open question to spark a conversation.
+        Don't list options or be transactional. Just chat.
+
+        Card title: \(ctx.title)
+        Card content:
+        \(ctx.content)
+        """
+    }
+
+    /// Called from the notification handler. Stores card data so ChatView.onAppear can fire it
+    /// once the view is actually mounted (avoids missing the notification during tab transition).
+    func scheduleCardChat(title: String, content: String, type: String) {
+        pendingCardTrigger = (title: title, content: content, type: type)
+    }
+
+    /// Called by ChatView.onAppear after the agent tab has fully mounted.
+    func fireCardTriggerIfNeeded() {
+        guard let card = pendingCardTrigger else { return }
+        pendingCardTrigger = nil
+        openChatWithCard(title: card.title, content: card.content, type: card.type)
+    }
+
+    /// Starts a new conversation with card content as context; Agent speaks first.
+    func openChatWithCard(title: String, content: String, type: String) {
+        pendingCardTrigger = nil  // Clear any scheduled trigger — we're firing right now
+        if isProcessing { cancelProcessing() }
+        clearConversation()
+        pendingCardContext = (title: title, content: content, type: type)
+
+        let convId = UUID()
+        currentConversationId = convId
+        currentConversationTitle = title.isEmpty ? "Agent Card" : String(title.prefix(40))
+        storage.createConversation(id: convId, title: currentConversationTitle)
+        conversations = storage.fetchConversations()
+
+        isProcessing = true
+        error = nil
+        streamingText = ""
+        workStatus = nil
+        currentSuggestions = []
+        startWorkStatus()
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.processConversation()
+            self.pendingCardContext = nil
+            self.isProcessing = false
+            self.currentProcessingTask = nil
+        }
+        currentProcessingTask = task
     }
 
     private func agentCharacterSection() -> String {

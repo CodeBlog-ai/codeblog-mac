@@ -5,10 +5,16 @@ import AppKit
 struct StatusMenuView: View {
     let dismissMenu: () -> Void
     @ObservedObject private var pauseManager = PauseManager.shared
+    @ObservedObject private var heartbeat = AgentHeartbeatService.shared
     private let updaterManager = UpdaterManager.shared
 
     var body: some View {
         VStack(spacing: 6) {
+            // Agent heartbeat interval
+            AgentIntervalSection(heartbeat: heartbeat)
+
+            MenuDivider()
+
             // Pause/Resume section
             if pauseManager.isPaused {
                 PausedSection(onResume: resumeRecording)
@@ -19,7 +25,7 @@ struct StatusMenuView: View {
             MenuDivider()
 
             MenuRow(title: "Open CodeBlog", systemImage: "macwindow", action: openCodeBlog)
-            MenuRow(title: "Open Recordings", action: openRecordingsFolder)
+            MenuRow(title: "Open Timeline", systemImage: "calendar", action: openTimeline)
             MenuRow(title: "Check for Updates", action: checkForUpdates)
 
             MenuDivider()
@@ -28,7 +34,7 @@ struct StatusMenuView: View {
         }
         .padding(.vertical, 9)
         .padding(.horizontal, 9)
-        .frame(minWidth: 200, maxWidth: 210)
+        .frame(minWidth: 220, maxWidth: 230)
         .background(.regularMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
@@ -45,7 +51,6 @@ struct StatusMenuView: View {
         let menuWindowNumber = NSApp.keyWindow?.windowNumber
 
         performAfterMenuDismiss {
-            // Only show Dock icon if user preference allows it
             let showDockIcon = UserDefaults.standard.object(forKey: "showDockIcon") as? Bool ?? true
             if showDockIcon {
                 NSApp.setActivationPolicy(.regular)
@@ -67,10 +72,24 @@ struct StatusMenuView: View {
         }
     }
 
-    private func openRecordingsFolder() {
+    private func openTimeline() {
         performAfterMenuDismiss {
-            let directory = StorageManager.shared.recordingsRoot
-            NSWorkspace.shared.open(directory)
+            let showDockIcon = UserDefaults.standard.object(forKey: "showDockIcon") as? Bool ?? true
+            if showDockIcon { NSApp.setActivationPolicy(.regular) }
+            NSApp.unhide(nil)
+            NSApp.activate(ignoringOtherApps: true)
+
+            var showedWindow = false
+            for window in NSApp.windows where window.canBecomeKey {
+                if window.isMiniaturized { window.deminiaturize(nil) }
+                window.makeKeyAndOrderFront(nil)
+                showedWindow = true
+            }
+            if !showedWindow {
+                MainWindowManager.shared.showMainWindow()
+            }
+
+            NotificationCenter.default.post(name: .navigateToTimeline, object: nil)
         }
     }
 
@@ -90,12 +109,66 @@ struct StatusMenuView: View {
 
     private func performAfterMenuDismiss(_ action: @escaping () -> Void) {
         dismissMenu()
-
         DispatchQueue.main.async {
             DispatchQueue.main.async {
                 action()
             }
         }
+    }
+}
+
+// MARK: - Agent Interval Section
+
+private struct AgentIntervalSection: View {
+    @ObservedObject var heartbeat: AgentHeartbeatService
+
+    // Slider maps 0-3 to [15, 30, 60, 120] minutes
+    private let steps: [Int] = [15, 30, 60, 120]
+
+    private var sliderValue: Binding<Double> {
+        Binding(
+            get: {
+                let idx = steps.firstIndex(of: heartbeat.intervalMinutes) ?? 1
+                return Double(idx)
+            },
+            set: { newVal in
+                let idx = Int(newVal.rounded())
+                heartbeat.intervalMinutes = steps[idx]
+            }
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Agent scan every")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(heartbeat.intervalMinutes) min")
+                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(.primary)
+            }
+            .padding(.horizontal, 5)
+
+            Slider(value: sliderValue, in: 0...Double(steps.count - 1), step: 1)
+                .controlSize(.small)
+                .padding(.horizontal, 5)
+
+            // Status indicator
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(heartbeat.isRunning
+                          ? (heartbeat.isGenerating ? Color.orange : Color.green)
+                          : Color.gray)
+                    .frame(width: 6, height: 6)
+                Text(heartbeat.isGenerating ? "Generating…" : (heartbeat.isRunning ? "Active" : "Paused"))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 5)
+        }
+        .padding(.vertical, 2)
     }
 }
 

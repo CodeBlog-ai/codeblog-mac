@@ -44,7 +44,7 @@ final class StatusBarController: NSObject {
 
     private func showPopover() {
         guard let button = statusItem.button else { return }
-        popover.contentSize = NSSize(width: 220, height: 200)
+        popover.contentSize = NSSize(width: 240, height: 280)
         popover.contentViewController = NSHostingController(
             rootView: StatusMenuView(dismissMenu: { [weak self] in
                 self?.popover.performClose(nil)

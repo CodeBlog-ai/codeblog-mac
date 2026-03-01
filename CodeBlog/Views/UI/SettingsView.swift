@@ -12,6 +12,7 @@ struct SettingsView: View {
     private enum SettingsTab: String, CaseIterable, Identifiable {
         case storage
         case providers
+        case agent
         case other
 
         var id: String { rawValue }
@@ -20,6 +21,7 @@ struct SettingsView: View {
             switch self {
             case .storage: return "Storage"
             case .providers: return "Providers"
+            case .agent: return "Agent"
             case .other: return "Other"
             }
         }
@@ -28,6 +30,7 @@ struct SettingsView: View {
             switch self {
             case .storage: return "Recording status and disk usage"
             case .providers: return "Manage LLM providers and customize prompts"
+            case .agent: return "Heartbeat interval and AI sync settings"
             case .other: return "General preferences & support"
             }
         }
@@ -234,6 +237,8 @@ struct SettingsView: View {
                 SettingsStorageTabView(viewModel: storageViewModel)
             case .providers:
                 SettingsProvidersTabView(viewModel: providersViewModel)
+            case .agent:
+                SettingsAgentTabView()
             case .other:
                 SettingsOtherTabView(viewModel: otherViewModel, launchAtLoginManager: launchAtLoginManager)
             }

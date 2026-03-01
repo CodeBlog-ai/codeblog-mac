@@ -164,6 +164,25 @@ extension NotificationService: UNUserNotificationCenterDelegate {
     ) {
         let identifier = response.notification.request.identifier
 
+        if identifier.hasPrefix("agent.heartbeat.") {
+            let previewId = response.notification.request.content.userInfo["previewId"] as? String ?? ""
+            Task { @MainActor in
+                NotificationCenter.default.post(
+                    name: .navigateToAgentPost,
+                    object: nil,
+                    userInfo: ["previewId": previewId]
+                )
+                NSApp.activate(ignoringOtherApps: true)
+                let showDockIcon = UserDefaults.standard.object(forKey: "showDockIcon") as? Bool ?? true
+                if showDockIcon && NSApp.activationPolicy() == .accessory {
+                    NSApp.setActivationPolicy(.regular)
+                }
+                NSApp.windows.first?.makeKeyAndOrderFront(nil)
+            }
+            completionHandler()
+            return
+        }
+
         guard identifier.hasPrefix("journal.") else {
             completionHandler()
             return
@@ -200,6 +219,11 @@ extension NotificationService: UNUserNotificationCenterDelegate {
     ) {
         let identifier = notification.request.identifier
         print("[NotificationService] willPresent called for: \(identifier)")
+
+        if identifier.hasPrefix("agent.heartbeat.") {
+            completionHandler([.banner, .sound])
+            return
+        }
 
         guard identifier.hasPrefix("journal.") else {
             print("[NotificationService] willPresent: not a journal notification, skipping")

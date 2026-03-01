@@ -241,4 +241,7 @@ extension Notification.Name {
     static let timelineDataUpdated = Notification.Name("timelineDataUpdated")
     static let showTimelineFailureToast = Notification.Name("showTimelineFailureToast")
     static let openProvidersSettings = Notification.Name("openProvidersSettings")
+    static let navigateToAgentPost = Notification.Name("navigateToAgentPost")   // userInfo: ["previewId": String]
+    static let injectAgentPostToChat = Notification.Name("injectAgentPostToChat")
+    static let navigateToTimeline = Notification.Name("navigateToTimeline")
 }
