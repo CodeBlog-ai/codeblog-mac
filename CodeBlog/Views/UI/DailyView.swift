@@ -54,6 +54,9 @@ struct DailyView: View {
 
     var body: some View {
         ZStack {
+            #if DEBUG
+            unlockedContent
+            #else
             if isUnlocked {
                 unlockedContent
                     .transition(.opacity)
@@ -61,6 +64,7 @@ struct DailyView: View {
                 lockScreen
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
+            #endif
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     }
