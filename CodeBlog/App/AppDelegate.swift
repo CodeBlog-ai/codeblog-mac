@@ -41,6 +41,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Bundle(path: "/Applications/InjectionIII.app/Contents/Resources/macOSInjection.bundle")?.load()
         #endif
 
+        // Single-instance guard: if another instance with the same bundle ID is already
+        // running, forward any pending deep link URLs to it and exit this duplicate instance.
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        let bundleID = Bundle.main.bundleIdentifier ?? ""
+        let runningInstances = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != currentPID }
+        if let existingApp = runningInstances.first {
+            // Forward any URL that triggered this launch to the existing instance
+            for url in pendingDeepLinkURLs {
+                NSWorkspace.shared.open(url)
+            }
+            existingApp.activate(options: [.activateIgnoringOtherApps])
+            AppDelegate.allowTermination = true
+            NSApp.terminate(nil)
+            return
+        }
+
         // Block termination by default; only specific flows enable it.
         AppDelegate.allowTermination = false
         applySavedDockIconPreference()
