@@ -1632,12 +1632,16 @@ final class StorageManager: StorageManaging, @unchecked Sendable {
                 var distractions: [Distraction]? = nil
                 var appSites: AppSites? = nil
                 var isBackupGenerated: Bool? = nil
+                var agentCardType: String? = nil
+                var previewId: String? = nil
                 if let metadataString: String = row["metadata"],
                    let jsonData = metadataString.data(using: .utf8) {
                     if let meta = try? decoder.decode(TimelineMetadata.self, from: jsonData) {
                         distractions = meta.distractions
                         appSites = meta.appSites
                         isBackupGenerated = meta.isBackupGenerated
+                        agentCardType = meta.agentCardType
+                        previewId = meta.previewId
                     } else if let legacy = try? decoder.decode([Distraction].self, from: jsonData) {
                         distractions = legacy
                     }
@@ -1658,8 +1662,8 @@ final class StorageManager: StorageManaging, @unchecked Sendable {
                     otherVideoSummaryURLs: nil,
                     appSites: appSites,
                     isBackupGenerated: isBackupGenerated,
-                    agentCardType: nil,
-                    previewId: nil
+                    agentCardType: agentCardType,
+                    previewId: previewId
                 )
             }
         }) ?? []
@@ -1798,12 +1802,16 @@ final class StorageManager: StorageManaging, @unchecked Sendable {
                 var distractions: [Distraction]? = nil
                 var appSites: AppSites? = nil
                 var isBackupGenerated: Bool? = nil
+                var agentCardType: String? = nil
+                var previewId: String? = nil
                 if let metadataString: String = row["metadata"],
                    let jsonData = metadataString.data(using: .utf8) {
                     if let meta = try? decoder.decode(TimelineMetadata.self, from: jsonData) {
                         distractions = meta.distractions
                         appSites = meta.appSites
                         isBackupGenerated = meta.isBackupGenerated
+                        agentCardType = meta.agentCardType
+                        previewId = meta.previewId
                     } else if let legacy = try? decoder.decode([Distraction].self, from: jsonData) {
                         distractions = legacy
                     }
@@ -1826,8 +1834,8 @@ final class StorageManager: StorageManaging, @unchecked Sendable {
                     otherVideoSummaryURLs: nil,
                     appSites: appSites,
                     isBackupGenerated: isBackupGenerated,
-                    agentCardType: nil,
-                    previewId: nil
+                    agentCardType: agentCardType,
+                    previewId: previewId
                 )
             }
         }

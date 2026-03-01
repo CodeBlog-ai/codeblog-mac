@@ -190,6 +190,9 @@ final class MCPChatRuntime {
                        let previewID = extractPreviewID(from: result.text) {
                         print("[MCPChatRuntime] Extracted preview_id: \(previewID)")
                         latestPreviewID = previewID
+                        if !result.isError {
+                            savePreviewPostToTimeline(resultText: result.text)
+                        }
                     }
                     if call.name == "confirm_post" {
                         print("[MCPChatRuntime] confirm_post result - isError: \(result.isError), full response: \(result.text)")
@@ -469,6 +472,9 @@ final class MCPChatRuntime {
                        let previewID = extractPreviewID(from: result.text) {
                         print("[MCPChatRuntime] Extracted preview_id: \(previewID)")
                         latestPreviewID = previewID
+                        if !result.isError {
+                            savePreviewPostToTimeline(resultText: result.text)
+                        }
                     }
                     if call.name == "confirm_post" {
                         print("[MCPChatRuntime] confirm_post result - isError: \(result.isError), full response: \(result.text)")
@@ -823,6 +829,52 @@ final class MCPChatRuntime {
             return nil
         }
         return text
+    }
+
+    /// 聊天中调用 preview_post 成功后，将卡片保存到 Timeline 并刷新 UI。
+    /// 与 AgentHeartbeatService 的逻辑保持一致，区别在于不发系统通知（用户正在聊天，不需要打断）。
+    private func savePreviewPostToTimeline(resultText: String) {
+        guard let data = resultText.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
+
+        let previewId = json["preview_id"] as? String ?? ""
+        let rawType = json["type"] as? String ?? "journal"
+        let validTypes: Set<String> = ["journal", "insight", "post"]
+        let cardType = validTypes.contains(rawType) ? rawType : "journal"
+        let title = json["title"] as? String ?? "Agent 记录"
+        let summary = json["summary"] as? String ?? ""
+        let content = json["content"] as? String ?? summary
+
+        let now = Date()
+        let startDate = parseISODate(json["start_time"] as? String) ?? now.addingTimeInterval(-30 * 60)
+        let endDate = parseISODate(json["end_time"] as? String) ?? now
+
+        StorageManager.shared.saveAgentTimelineCard(
+            startDate: startDate,
+            endDate: endDate,
+            title: title,
+            summary: summary,
+            detailedSummary: content,
+            agentCardType: cardType,
+            previewId: previewId.isEmpty ? nil : previewId
+        )
+
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .timelineDataUpdated, object: nil)
+        }
+
+        print("[MCPChatRuntime] Saved chat preview_post to Timeline: type=\(cardType) title=\(title)")
+    }
+
+    private func parseISODate(_ str: String?) -> Date? {
+        guard let str, !str.isEmpty else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = formatter.date(from: str) { return d }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: str)
     }
 
     private func extractPreviewID(from text: String) -> String? {
