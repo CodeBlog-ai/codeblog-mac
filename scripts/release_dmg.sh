@@ -80,6 +80,8 @@ if command -v create-dmg &>/dev/null; then
     --hide-extension "$APP_NAME.app"
     --app-drop-link 600 185
     --no-internet-enable
+    # Avoid flaky Finder AppleScript timeouts in scripted releases.
+    --skip-jenkins
   )
 
   if [ -f "$DMG_BG" ]; then
