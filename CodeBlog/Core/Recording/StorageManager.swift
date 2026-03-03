@@ -1561,7 +1561,7 @@ final class StorageManager: StorageManaging, @unchecked Sendable {
         let encoder = JSONEncoder()
         let meta = TimelineMetadata(
             distractions: nil,
-            appSites: AppSites(primary: "codeblog.so", secondary: nil),
+            appSites: AppSites(primary: "codeblog.ai", secondary: nil),
             isBackupGenerated: nil
         )
         let metadataString: String? = (try? encoder.encode(meta)).flatMap { String(data: $0, encoding: .utf8) }
