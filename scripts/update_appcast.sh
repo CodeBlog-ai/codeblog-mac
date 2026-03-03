@@ -36,9 +36,18 @@ NEW_ITEM="    <item>
       />
     </item>"
 
-# Insert new item after <language>en</language>
-sed -i '' "/<language>en<\/language>/a\\
-$NEW_ITEM
-" "$APPCAST"
+# Avoid duplicate insertion for the same release.
+if grep -q "<sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>" "$APPCAST"; then
+  echo "==> appcast.xml already contains v$VERSION, skipping insert"
+  exit 0
+fi
+
+# Insert new item after <language>en</language> using sed read-file mode.
+TMP_FILE="$(mktemp)"
+TMP_ITEM="$(mktemp)"
+printf '%s\n' "$NEW_ITEM" > "$TMP_ITEM"
+sed '/<language>en<\/language>/r '"$TMP_ITEM" "$APPCAST" > "$TMP_FILE"
+mv "$TMP_FILE" "$APPCAST"
+rm -f "$TMP_ITEM"
 
 echo "==> Updated appcast.xml with v$VERSION (build $BUILD)"
