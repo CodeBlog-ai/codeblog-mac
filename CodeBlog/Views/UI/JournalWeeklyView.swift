@@ -2,28 +2,37 @@ import SwiftUI
 
 /// Weekly journal overview replicating the highlighted Figma exploration.
 struct JournalWeeklyView: View {
+    @Binding var selectedPeriod: JournalWeeklyViewPeriod
     var summary: JournalWeeklySummary
+    var showsHeaderToolbar: Bool
+    var onSelectDay: ((String) -> Void)?
     var onSetReminders: (() -> Void)?
     var onNavigatePrevious: (() -> Void)?
     var onNavigateNext: (() -> Void)?
 
-    @State private var selectedPeriod: JournalWeeklyViewPeriod = .week
-
     init(
+        selectedPeriod: Binding<JournalWeeklyViewPeriod> = .constant(.week),
         summary: JournalWeeklySummary = .placeholder,
+        showsHeaderToolbar: Bool = true,
+        onSelectDay: ((String) -> Void)? = nil,
         onSetReminders: (() -> Void)? = nil,
         onNavigatePrevious: (() -> Void)? = nil,
         onNavigateNext: (() -> Void)? = nil
     ) {
+        self._selectedPeriod = selectedPeriod
         self.summary = summary
+        self.showsHeaderToolbar = showsHeaderToolbar
+        self.onSelectDay = onSelectDay
         self.onSetReminders = onSetReminders
         self.onNavigatePrevious = onNavigatePrevious
         self.onNavigateNext = onNavigateNext
     }
 
     var body: some View {
-        VStack(spacing: 26) {
-            headerToolbar
+        VStack(spacing: showsHeaderToolbar ? 26 : 16) {
+            if showsHeaderToolbar {
+                headerToolbar
+            }
 
             VStack(spacing: 6) {
                 Text(summary.title)
@@ -44,9 +53,11 @@ struct JournalWeeklyView: View {
             .frame(maxWidth: .infinity)
 
             timeline
+
+            weeklyDigestCard
         }
         .padding(.vertical, 34)
-        .padding(.horizontal, 38)
+        .padding(.horizontal, 28)
         .background(
             RoundedRectangle(cornerRadius: 28, style: .continuous)
                 .fill(JournalWeeklyTokens.background)
@@ -110,10 +121,59 @@ struct JournalWeeklyView: View {
 
     private var timeline: some View {
         GeometryReader { geo in
-            TimelineCanvas(summary: summary, size: geo.size)
+            TimelineCanvas(summary: summary, size: geo.size, onSelectDay: onSelectDay)
         }
-        .frame(height: 320)
+        .frame(height: 400)
         .padding(.top, 8)
+    }
+
+    private var weeklyDigestCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Weekly digest")
+                .font(.custom("InstrumentSerif-Regular", size: 24))
+                .foregroundStyle(JournalWeeklyTokens.primaryText)
+
+            HStack(spacing: 16) {
+                digestMetric(title: "Reports", value: "\(summary.digest.publishedReportDays) / 7")
+                digestMetric(title: "Events", value: "\(summary.digest.totalEvents)")
+                digestMetric(title: "Active categories", value: "\(summary.digest.activeCategoryCount)")
+                digestMetric(title: "Blank days", value: "\(summary.digest.blankDays)")
+            }
+
+            if let mostActive = summary.digest.mostActiveDayLabel,
+               !mostActive.isEmpty {
+                Text("Most active day: \(mostActive)")
+                    .font(.custom("Nunito-SemiBold", size: 14))
+                    .foregroundStyle(JournalWeeklyTokens.secondaryText)
+            }
+
+            Text(summary.digest.nextWeekSuggestion)
+                .font(.custom("Nunito-Regular", size: 14))
+                .foregroundStyle(JournalWeeklyTokens.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.85))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.white.opacity(0.55), lineWidth: 1)
+        )
+        .padding(.top, 18)
+    }
+
+    private func digestMetric(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.custom("Nunito-Regular", size: 12))
+                .foregroundStyle(JournalWeeklyTokens.secondaryText.opacity(0.9))
+            Text(value)
+                .font(.custom("Nunito-SemiBold", size: 16))
+                .foregroundStyle(JournalWeeklyTokens.primaryText)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -122,6 +182,7 @@ struct JournalWeeklyView: View {
 private struct TimelineCanvas: View {
     let summary: JournalWeeklySummary
     let size: CGSize
+    let onSelectDay: ((String) -> Void)?
 
     private struct TimelinePoint: Identifiable {
         let id = UUID()
@@ -176,7 +237,7 @@ private struct TimelineCanvas: View {
     }
 
     private func dayNode(for timelinePoint: TimelinePoint) -> some View {
-        VStack(spacing: 6) {
+        let content = VStack(spacing: 6) {
             Text(timelinePoint.day.label)
                 .font(.custom("Nunito-SemiBold", size: 13))
                 .foregroundStyle(timelinePoint.day.isMuted ? JournalWeeklyTokens.secondaryText : .white)
@@ -191,11 +252,25 @@ private struct TimelineCanvas: View {
                 )
         }
         .position(timelinePoint.point)
+
+        if let onSelectDay {
+            return AnyView(
+                Button {
+                    onSelectDay(timelinePoint.day.dayString)
+                } label: {
+                    content
+                }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+            )
+        }
+
+        return AnyView(content)
     }
 
     private func connector(for entry: TimelinePoint, card: JournalWeeklyEntry) -> some View {
         let anchor = entry.point
-        let verticalDistance: CGFloat = card.position == .above ? -112 : 112
+        let verticalDistance: CGFloat = card.position == .above ? -122 : 122
         let lineHeight = abs(verticalDistance) - 34
 
         return Rectangle()
@@ -209,14 +284,36 @@ private struct TimelineCanvas: View {
 
     private func cardView(for entry: TimelinePoint, card: JournalWeeklyEntry) -> some View {
         let anchor = entry.point
-        let verticalDistance: CGFloat = card.position == .above ? -140 : 140
-
-        return JournalWeeklyEntryCard(entry: card)
+        let verticalDistance: CGFloat = card.position == .above ? -156 : 156
+        let clampedX = clampedCardCenterX(anchor.x, cardWidth: card.preferredWidth)
+        let content = JournalWeeklyEntryCard(entry: card)
             .frame(width: card.preferredWidth)
             .position(
-                x: anchor.x,
+                x: clampedX,
                 y: anchor.y + verticalDistance
             )
+
+        if let onSelectDay {
+            return AnyView(
+                Button {
+                    onSelectDay(entry.day.dayString)
+                } label: {
+                    content
+                }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+            )
+        }
+
+        return AnyView(content)
+    }
+
+    private func clampedCardCenterX(_ x: CGFloat, cardWidth: CGFloat) -> CGFloat {
+        let half = cardWidth / 2
+        let minX = half + 8
+        let maxX = size.width - half - 8
+        guard minX <= maxX else { return size.width / 2 }
+        return min(max(x, minX), maxX)
     }
 }
 
@@ -322,18 +419,39 @@ struct JournalWeeklySummary {
     var description: String
     var disableForwardNavigation: Bool
     var days: [JournalWeeklyDay]
+    var digest: JournalWeeklyDigest
 
     static let placeholder = JournalWeeklySummary(
         title: "Week in review",
         dateRange: "October 19 – 25",
         description: "Made progress on the redesign project, shared updates with the leads by the end of the week. Looked at design references and shopped for groceries and necessities.",
         disableForwardNavigation: true,
-        days: JournalWeeklyDay.placeholder
+        days: JournalWeeklyDay.placeholder,
+        digest: .placeholder
+    )
+}
+
+struct JournalWeeklyDigest {
+    var publishedReportDays: Int
+    var totalEvents: Int
+    var activeCategoryCount: Int
+    var mostActiveDayLabel: String?
+    var blankDays: Int
+    var nextWeekSuggestion: String
+
+    static let placeholder = JournalWeeklyDigest(
+        publishedReportDays: 0,
+        totalEvents: 0,
+        activeCategoryCount: 0,
+        mostActiveDayLabel: nil,
+        blankDays: 0,
+        nextWeekSuggestion: "Keep your rhythm by publishing a daily report and reviewing one key notification each day."
     )
 }
 
 struct JournalWeeklyDay: Identifiable {
     let id = UUID()
+    var dayString: String
     var label: String
     var progress: CGFloat?
     var isMuted: Bool
@@ -341,37 +459,37 @@ struct JournalWeeklyDay: Identifiable {
 
     static var placeholder: [JournalWeeklyDay] {
         [
-            JournalWeeklyDay(label: "S", progress: 0.02, isMuted: true, entry: JournalWeeklyEntry(
+            JournalWeeklyDay(dayString: "1970-01-04", label: "S", progress: 0.02, isMuted: true, entry: JournalWeeklyEntry(
                 summary: "Worked on design directions with the team. Watched a new episode of Curb Your Enthusiasm.",
                 position: .below,
                 icons: [.figma, .tv]
             )),
-            JournalWeeklyDay(label: "M", progress: 0.18, isMuted: false, entry: JournalWeeklyEntry(
+            JournalWeeklyDay(dayString: "1970-01-05", label: "M", progress: 0.18, isMuted: false, entry: JournalWeeklyEntry(
                 summary: "Refined design directions. Shopped for groceries.",
                 position: .above,
                 icons: [.figma, .cart]
             )),
-            JournalWeeklyDay(label: "T", progress: 0.34, isMuted: false, entry: JournalWeeklyEntry(
+            JournalWeeklyDay(dayString: "1970-01-06", label: "T", progress: 0.34, isMuted: false, entry: JournalWeeklyEntry(
                 summary: "Prepared presentation and troubleshooted with Jason. Shopped for home necessities on Amazon.",
                 position: .below,
                 icons: [.slides, .cart]
             )),
-            JournalWeeklyDay(label: "W", progress: 0.5, isMuted: false, entry: JournalWeeklyEntry(
+            JournalWeeklyDay(dayString: "1970-01-07", label: "W", progress: 0.5, isMuted: false, entry: JournalWeeklyEntry(
                 summary: "Updated mockups and presentation based on new feedback. Spent some time watching YouTube videos.",
                 position: .above,
                 icons: [.figma, .video]
             )),
-            JournalWeeklyDay(label: "T", progress: 0.66, isMuted: false, entry: JournalWeeklyEntry(
+            JournalWeeklyDay(dayString: "1970-01-08", label: "T", progress: 0.66, isMuted: false, entry: JournalWeeklyEntry(
                 summary: "Refined design directions and shared with them with the leads.",
                 position: .below,
                 icons: [.figma]
             )),
-            JournalWeeklyDay(label: "F", progress: 0.82, isMuted: false, entry: JournalWeeklyEntry(
+            JournalWeeklyDay(dayString: "1970-01-09", label: "F", progress: 0.82, isMuted: false, entry: JournalWeeklyEntry(
                 summary: "Read some articles on Substack and jotting down notes. Spent most of the day away from the computer.",
                 position: .above,
                 icons: [.books, .moon]
             )),
-            JournalWeeklyDay(label: "S", progress: 0.98, isMuted: true, entry: nil)
+            JournalWeeklyDay(dayString: "1970-01-10", label: "S", progress: 0.98, isMuted: true, entry: nil)
         ]
     }
 }
@@ -437,7 +555,7 @@ private enum JournalWeeklyTokens {
 }
 
 #Preview("Weekly Review", traits: .fixedLayout(width: 1000, height: 600)) {
-    JournalWeeklyView()
+    JournalWeeklyView(selectedPeriod: .constant(.week))
         .padding()
         .background(Color(hex: "F6F0EA"))
 }

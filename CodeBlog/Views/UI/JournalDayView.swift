@@ -9,6 +9,7 @@ struct BookFlipModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            .compositingGroup()
             .rotation3DEffect(
                 .degrees(angle),
                 axis: (x: 0, y: 1, z: 0),
@@ -18,15 +19,23 @@ struct BookFlipModifier: ViewModifier {
             )
             .opacity(abs(angle) > 89 ? 0 : 1)
             .overlay(
-                Color.black
-                    .opacity(calculateShadowOpacity(angle: angle))
+                LinearGradient(
+                    colors: [
+                        Color.white.opacity(0.32),
+                        Color.white.opacity(0.04),
+                        Color(red: 0.97, green: 0.91, blue: 0.84).opacity(0.25)
+                    ],
+                    startPoint: anchor == .leading ? .leading : .trailing,
+                    endPoint: anchor == .leading ? .trailing : .leading
+                )
+                    .opacity(calculateFlipSheenOpacity(angle: angle))
                     .allowsHitTesting(false)
             )
     }
     
-    private func calculateShadowOpacity(angle: Double) -> Double {
+    private func calculateFlipSheenOpacity(angle: Double) -> Double {
         let progress = abs(angle) / 90.0
-        return progress * 0.15
+        return progress * 0.09
     }
 }
 
@@ -147,6 +156,46 @@ struct JournalPillButtonStyle: ButtonStyle {
     }
 }
 
+private struct JournalGeneratePillLabel: View {
+    var title: String
+    var isLoading: Bool = false
+    var compact: Bool = false
+    var includeSparkles: Bool = true
+
+    var body: some View {
+        HStack(alignment: .center, spacing: compact ? 4 : 6) {
+            if isLoading {
+                ProgressView()
+                    .controlSize(.small)
+            } else if includeSparkles {
+                Image(systemName: "sparkles")
+                    .font(.system(size: compact ? 11 : 13, weight: .semibold))
+            }
+
+            Text(title)
+                .font(.custom("Nunito-SemiBold", size: compact ? 12 : 16))
+                .lineLimit(1)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, compact ? 13 : 20)
+        .padding(.vertical, compact ? 7 : 10)
+        .background(
+            Capsule(style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [Color(hex: "FF996E"), Color(hex: "BFA6FF")],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .stroke(Color(hex: "F6D5BE"), lineWidth: 1)
+        )
+    }
+}
+
 
 // MARK: - Main View
 
@@ -154,21 +203,68 @@ struct JournalDayView: View {
     var onSetReminders: (() -> Void)?
 
     @StateObject private var manager = JournalDayManager()
+    @StateObject private var weeklyViewModel = JournalWeeklyViewModel()
     @State private var selectedPeriod: JournalDayViewPeriod = .day
     
     @Namespace private var layoutNamespace
     @State private var transitionDirection: AnyTransition = .identity
     @State private var pageId = UUID()
+    @State private var isInjectingDailyReport = false
     
     init(onSetReminders: (() -> Void)? = nil) {
         self.onSetReminders = onSetReminders
     }
 
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            VStack(spacing: 10) {
-                toolbar
+        GeometryReader { geo in
+            ScrollView(.vertical, showsIndicators: false) {
+                journalContent(fillHeight: true)
+                    .frame(
+                        maxWidth: .infinity,
+                        minHeight: max(geo.size.height - 2, 0),
+                        alignment: .top
+                    )
+                    .padding(.bottom, 14)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .onAppear {
+            manager.loadCurrentDay()
+            weeklyViewModel.primeCurrentWeekSummary()
+            Task { await weeklyViewModel.refresh(forceRemote: false) }
+        }
+        .onChange(of: selectedPeriod) { _, newValue in
+            guard newValue == .week else { return }
+            weeklyViewModel.primeCurrentWeekSummary()
+            Task { await weeklyViewModel.refresh(forceRemote: false) }
+        }
+    }
 
+    @ViewBuilder
+    private func journalContent(fillHeight: Bool) -> some View {
+        VStack(spacing: 10) {
+            toolbar
+
+            if selectedPeriod == .week {
+                JournalWeeklyView(
+                    selectedPeriod: weeklyPeriodBinding,
+                    summary: weeklyViewModel.summary,
+                    showsHeaderToolbar: false,
+                    onSelectDay: { dayString in
+                        transitionDirection = dayString < manager.currentDay ? .bookFlipPrev : .bookFlipNext
+                        withAnimation(.easeInOut(duration: 0.45)) {
+                            selectedPeriod = .day
+                            manager.loadDay(dayString)
+                            pageId = UUID()
+                        }
+                    },
+                    onSetReminders: nil,
+                    onNavigatePrevious: nil,
+                    onNavigateNext: nil
+                )
+                .frame(maxWidth: .infinity, alignment: .top)
+                .id("weekly-\(weeklyViewModel.weekOffset)")
+            } else {
                 Text(manager.headline)
                     .font(.custom("InstrumentSerif-Regular", size: 36))
                     .foregroundStyle(JournalDayTokens.primaryText)
@@ -176,23 +272,63 @@ struct JournalDayView: View {
                         transaction.animation = nil
                     }
 
-                contentForFlowState
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                    .id(pageId)
-                    .transition(transitionDirection)
+                if fillHeight {
+                    contentForFlowState
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .id(pageId)
+                        .transition(transitionDirection)
+                } else {
+                    contentForFlowState
+                        .frame(maxWidth: .infinity, alignment: .top)
+                        .id(pageId)
+                        .transition(transitionDirection)
+                }
 
-                Spacer(minLength: 0)
+                if fillHeight {
+                    Spacer(minLength: 0)
+                }
             }
-            .padding(.top, 10)
-            .padding(.horizontal, 20)
-            .padding(.bottom, 10)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
+            if let error = weeklyViewModel.errorMessage,
+               selectedPeriod == .week,
+               !error.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(error)
+                    .font(.custom("Nunito-Regular", size: 12))
+                    .foregroundStyle(Color.red.opacity(0.75))
+            }
+        }
+        .padding(.top, 10)
+        .padding(.horizontal, 20)
+        .padding(.bottom, 10)
+        .frame(maxWidth: .infinity, maxHeight: fillHeight ? .infinity : nil, alignment: .top)
+        .background(
+            ZStack {
+                LinearGradient(
+                    colors: [
+                        Color(hex: "FFF8F0").opacity(0.42),
+                        .clear
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                RadialGradient(
+                    colors: [
+                        Color(hex: "F7CFA5").opacity(0.22),
+                        .clear
+                    ],
+                    center: .bottom,
+                    startRadius: 20,
+                    endRadius: 360
+                )
+            }
+        )
+    }
 
-        }
-        .onAppear {
-            manager.loadCurrentDay()
-        }
+    private var weeklyPeriodBinding: Binding<JournalWeeklyViewPeriod> {
+        Binding<JournalWeeklyViewPeriod>(
+            get: { selectedPeriod == .week ? .week : .day },
+            set: { selectedPeriod = ($0 == .week ? .week : .day) }
+        )
     }
 }
 
@@ -203,9 +339,17 @@ extension JournalDayView {
     var contentForFlowState: some View {
         switch manager.flowState {
         case .intro:
-            IntroView(ctaTitle: manager.ctaTitle, isEnabled: manager.isToday) {
-                withAnimation(.spring(response: 0.6, dampingFraction: 0.8)) {
-                    manager.startEditingIntentions()
+            IntroView(
+                ctaTitle: manager.ctaTitle,
+                isEnabled: manager.isToday,
+                emphasizeGenerateCTA: manager.shouldShowGenerateReportCTA
+            ) {
+                if manager.shouldShowGenerateReportCTA {
+                    triggerManualDailyReport()
+                } else {
+                    withAnimation(.spring(response: 0.6, dampingFraction: 0.8)) {
+                        manager.startEditingIntentions()
+                    }
                 }
             }
         case .summary:
@@ -242,9 +386,20 @@ extension JournalDayView {
                 isUnfolding: true,
                 namespace: layoutNamespace
             ) {
-                ReflectionPromptCard(isEnabled: manager.isToday) {
-                    withAnimation { manager.startReflecting() }
-                }
+                AgentReflectionCard(
+                    reflection: manager.agentReflection,
+                    status: manager.reflectionStatus,
+                    generatedAt: manager.reflectionGeneratedAt,
+                    nextEligibleAt: manager.reflectionNextEligibleAt,
+                    isLoading: manager.isRefreshingReflection,
+                    errorHint: manager.reflectionErrorHint,
+                    onRegenerate: {
+                        Task { await manager.refreshAgentReflection() }
+                    },
+                    onReflect: manager.isToday ? {
+                        withAnimation { manager.startReflecting() }
+                    } : nil
+                )
             }
             .zIndex(1)
             
@@ -298,31 +453,60 @@ extension JournalDayView {
     }
 
     private var toolbar: some View {
-        ZStack {
+        let hideGenerateInIntro = selectedPeriod == .day
+            && manager.flowState == .intro
+            && manager.shouldShowGenerateReportCTA
+        let showGenerateButton = !hideGenerateInIntro && selectedPeriod == .day
+        return ZStack {
             HStack(spacing: 10) {
                 JournalDayCircleButton(direction: .left) {
-                    transitionDirection = .bookFlipPrev
-                    withAnimation(.easeInOut(duration: 0.6)) {
-                        manager.navigateToPreviousDay()
-                        pageId = UUID()
+                    if selectedPeriod == .week {
+                        weeklyViewModel.navigatePreviousWeek()
+                        weeklyViewModel.primeCurrentWeekSummary()
+                        Task { await weeklyViewModel.refresh(forceRemote: false) }
+                    } else {
+                        transitionDirection = .bookFlipPrev
+                        withAnimation(.easeInOut(duration: 0.6)) {
+                            manager.navigateToPreviousDay()
+                            pageId = UUID()
+                        }
                     }
                 }
 
                 JournalDaySegmentedControl(selection: $selectedPeriod)
                     .fixedSize()
 
-                JournalDayCircleButton(direction: .right, isDisabled: !manager.canNavigateForward) {
-                    transitionDirection = .bookFlipNext
-                    withAnimation(.easeInOut(duration: 0.6)) {
-                        manager.navigateToNextDay()
-                        pageId = UUID()
+                JournalDayCircleButton(direction: .right, isDisabled: selectedPeriod == .week ? weeklyViewModel.summary.disableForwardNavigation : !manager.canNavigateForward) {
+                    if selectedPeriod == .week {
+                        guard !weeklyViewModel.summary.disableForwardNavigation else { return }
+                        weeklyViewModel.navigateNextWeek()
+                        weeklyViewModel.primeCurrentWeekSummary()
+                        Task { await weeklyViewModel.refresh(forceRemote: false) }
+                    } else {
+                        transitionDirection = .bookFlipNext
+                        withAnimation(.easeInOut(duration: 0.6)) {
+                            manager.navigateToNextDay()
+                            pageId = UUID()
+                        }
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .center)
 
-            HStack {
+            HStack(spacing: 8) {
                 Spacer()
+                if showGenerateButton {
+                    Button(action: triggerManualDailyReport) {
+                        JournalGeneratePillLabel(
+                            title: isInjectingDailyReport ? "Injecting..." : "Generate Today's Report",
+                            isLoading: isInjectingDailyReport,
+                            compact: true
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .pointingHandCursor()
+                }
+
                 Button(action: {
                     AnalyticsService.shared.capture("journal_reminders_opened")
                     onSetReminders?()
@@ -340,10 +524,68 @@ extension JournalDayView {
                     }
                 }
                 .buttonStyle(JournalPillButtonStyle(horizontalPadding: 12, verticalPadding: 6, font: .custom("Nunito-SemiBold", size: 12)))
-                .padding(.trailing, 20)
             }
+            .padding(.trailing, 20)
+        }
+        .frame(height: 34)
+    }
+
+    private func triggerManualDailyReport() {
+        guard !isInjectingDailyReport else { return }
+        isInjectingDailyReport = true
+        NotificationCenter.default.post(
+            name: .injectAgentPostToChat,
+            object: nil,
+            userInfo: [
+                "title": "Generate daily report",
+                "content": Self.dailyReportPrompt,
+                "cardType": "daily_report"
+            ]
+        )
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            isInjectingDailyReport = false
         }
     }
+
+    private static let dailyReportPrompt = """
+Generate my 'Day in Code' daily report. Follow these steps EXACTLY in order:
+
+STEP 1: Call collect_daily_stats to get today's coding activity data.
+- If it returns already_exists=true, STOP here — report already done.
+- If it returns no_activity=true, STOP here — nothing to report.
+- Save the date, timezone, and _rawStats from the result — you need them for save_daily_report later.
+
+STEP 2: Call scan_sessions with source='codex' and limit=8.
+- From the results, pick the top 2-3 sessions by activity.
+
+STEP 3: Call analyze_session on each picked session. Pass BOTH path and source EXACTLY from scan_sessions results.
+
+STEP 4: Write the blog post content (DO NOT call any tool yet).
+- Write as the AI agent in first person — tell the story of your day collaborating with the user.
+- The narrative is the main content. Stats are supporting context woven into the story.
+- Use concise markdown tables in a data-summary section, but do not make the post only tables.
+- Do NOT include any source code or file paths.
+- Prepare a catchy title (string), the full content (markdown, must NOT start with the title), and a summary.
+
+STEP 5: Call preview_post with ALL of these parameters:
+  - mode: 'manual'
+  - title: your catchy title (string, REQUIRED)
+  - content: your full markdown content (string, REQUIRED, must NOT start with the title)
+  - category: 'day-in-code'
+  - tags: ['day-in-code']
+  CRITICAL: Do NOT call preview_post with empty or missing title/content — it will fail.
+
+STEP 6: Call confirm_post with the post_id returned by preview_post. This is scheduled auto mode — do NOT wait for user confirmation.
+
+STEP 7: Call save_daily_report with:
+  - date and timezone from collect_daily_stats result
+  - post_id from confirm_post result
+  - _rawStats from collect_daily_stats result
+
+FORBIDDEN: Do NOT call post_to_codeblog or auto_post. Only use preview_post + confirm_post.
+This task MUST complete all 7 steps in this single run.
+"""
 }
 
 // MARK: - Reusable Modern Text Editor
@@ -557,15 +799,15 @@ private struct IntentionsEditForm: View {
     }
 
     private static let intentionsPlaceholders = [
-        "What does a good day look like?",
-        "If today goes well, what will you have done?"
+        "What should today's report focus on?",
+        "What outcome matters most by the end of today?"
     ]
 
     @State private var intentionsPlaceholder: String = intentionsPlaceholders.randomElement()!
 
     private var sectionIntentions: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Today's intentions")
+            Text("Today's focus")
                 .font(.custom("InstrumentSerif-Regular", size: 22))
                 .foregroundStyle(JournalDayTokens.sectionHeader)
                 .padding(.leading, titleLeading)
@@ -582,7 +824,7 @@ private struct IntentionsEditForm: View {
     private var sectionNotes: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
-                Text("Notes for today")
+                Text("Key highlights")
                     .font(.custom("InstrumentSerif-Regular", size: 22))
                     .foregroundStyle(JournalDayTokens.sectionHeader)
                     .padding(.leading, titleLeading)
@@ -590,7 +832,7 @@ private struct IntentionsEditForm: View {
 
             JournalTextEditor(
                 text: $notes,
-                placeholder: "What mindset do you want to carry today?",
+                placeholder: "Which moments, wins, or blockers should the report capture?",
                 minLines: 3
             )
         }
@@ -599,7 +841,7 @@ private struct IntentionsEditForm: View {
     private var sectionGoals: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
-                Text("Long term goals")
+                Text("Decisions & next steps")
                     .font(.custom("InstrumentSerif-Regular", size: 22))
                     .foregroundStyle(JournalDayTokens.sectionHeader)
                     .padding(.leading, titleLeading)
@@ -607,7 +849,7 @@ private struct IntentionsEditForm: View {
 
             JournalTextEditor(
                 text: $goals,
-                placeholder: "What are you working towards?",
+                placeholder: "What should happen next after today's work?",
                 minLines: 3
             )
         }
@@ -707,10 +949,10 @@ private struct JournalLeftCardView: View {
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: 18) {
-                section("Today's intentions") {
+                section("Today's focus") {
                     JournalDayBulletList(items: intentions)
                 }
-                section("Notes for the day") {
+                section("Key highlights") {
                     Text(notes.isEmpty ? "—" : notes)
                         .font(.custom("Nunito-Regular", size: 15))
                         .foregroundStyle(notes.isEmpty ? JournalDayTokens.bodyText.opacity(0.4) : JournalDayTokens.bodyText)
@@ -719,7 +961,7 @@ private struct JournalLeftCardView: View {
                     .foregroundStyle(JournalDayTokens.divider)
                     .overlay(JournalDayTokens.divider)
                     .padding(.vertical, 6)
-                section("Long term goals") {
+                section("Decisions & next steps") {
                     JournalDayBulletList(items: goals)
                 }
                 Spacer(minLength: 0)
@@ -801,17 +1043,132 @@ private struct JournalRightCard<Content: View>: View {
 
 // MARK: - Reflection Prompt & Edit Components
 
+private struct AgentReflectionCard: View {
+    let reflection: CodeBlogAPIService.AgentJournalReflectionResponse.Reflection?
+    let status: String
+    let generatedAt: Date?
+    let nextEligibleAt: Date?
+    let isLoading: Bool
+    let errorHint: String?
+    let onRegenerate: () -> Void
+    let onReflect: (() -> Void)?
+
+    private static let timestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm"
+        return formatter
+    }()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Agent reflections")
+                    .font(.custom("InstrumentSerif-Regular", size: 22))
+                    .foregroundStyle(JournalDayTokens.sectionHeader.opacity(0.9))
+
+                Spacer(minLength: 8)
+
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            if let reflection {
+                Text(reflection.agent_line)
+                    .font(.custom("Nunito-SemiBold", size: 16))
+                    .foregroundStyle(JournalDayTokens.bodyText)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(reflection.blocks.enumerated()), id: \.offset) { _, block in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(block.title)
+                                .font(.custom("InstrumentSerif-Regular", size: 18))
+                                .foregroundStyle(JournalDayTokens.sectionHeader.opacity(0.85))
+
+                            Text(block.body)
+                                .font(.custom("Nunito-Regular", size: 14))
+                                .foregroundStyle(JournalDayTokens.bodyText.opacity(0.8))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+
+                Text(reflection.context_digest)
+                    .font(.custom("Nunito-Regular", size: 13))
+                    .foregroundStyle(JournalDayTokens.bodyText.opacity(0.65))
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(fallbackText)
+                    .font(.custom("Nunito-Regular", size: 15))
+                    .foregroundStyle(JournalDayTokens.bodyText.opacity(0.65))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let errorHint,
+               !errorHint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(errorHint)
+                    .font(.custom("Nunito-Regular", size: 12))
+                    .foregroundStyle(Color(hex: "B65A38"))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 12) {
+                if let onReflect {
+                    Button("Reflect on your day", action: onReflect)
+                        .buttonStyle(JournalPillButtonStyle(horizontalPadding: 16, verticalPadding: 8))
+                }
+
+                Button("Regenerate", action: onRegenerate)
+                    .buttonStyle(.plain)
+                    .font(.custom("Nunito-SemiBold", size: 13))
+                    .foregroundStyle(JournalDayTokens.sectionHeader.opacity(0.8))
+                    .pointingHandCursor()
+
+                Spacer()
+
+                if let generatedAt {
+                    Text("Updated \(Self.timestampFormatter.string(from: generatedAt))")
+                        .font(.custom("Nunito-Regular", size: 12))
+                        .foregroundStyle(JournalDayTokens.bodyText.opacity(0.55))
+                } else if let nextEligibleAt {
+                    Text("Next refresh after \(Self.timestampFormatter.string(from: nextEligibleAt))")
+                        .font(.custom("Nunito-Regular", size: 12))
+                        .foregroundStyle(JournalDayTokens.bodyText.opacity(0.55))
+                }
+            }
+        }
+    }
+
+    private var fallbackText: String {
+        switch status {
+        case "provider_unavailable":
+            return "Agent is temporarily unable to respond. Please make sure a usable AI provider is available."
+        case "throttled":
+            if let nextEligibleAt {
+                return "Agent reflection is throttled to keep quality stable. You can refresh again around \(Self.timestampFormatter.string(from: nextEligibleAt))."
+            }
+            return "Agent reflection is cooling down. Try again a bit later."
+        default:
+            return "Your agent is building context from today's reports, activity, and memory. It will surface a reflection as soon as enough signal is available."
+        }
+    }
+}
+
 private struct ReflectionPromptCard: View {
     var isEnabled: Bool = true
     var onReflect: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Today's reflections")
+            Text("Agent reflections")
                 .font(.custom("InstrumentSerif-Regular", size: 22))
                 .foregroundStyle(JournalDayTokens.sectionHeader.opacity(0.4))
 
-            Text("Return near the end of your day to reflect on your intentions. Let CodeBlog generate a narrative summary based on the activities on your Timeline.")
+            Text("Come back later to reflect on today's focus. CodeBlog can then generate a narrative summary from your timeline signals.")
                 .font(.custom("Nunito-Regular", size: 15))
                 .foregroundStyle(JournalDayTokens.bodyText.opacity(0.65))
                 .fixedSize(horizontal: false, vertical: true)
@@ -893,7 +1250,7 @@ private struct ReflectionSavedCard: View {
                         .padding(.horizontal, 2)
                 }
             } else {
-                Text("Return near the end of your day to reflect on your intentions.")
+                Text("Come back later to reflect on today's focus.")
                     .font(.custom("Nunito-Regular", size: 15))
                     .foregroundStyle(JournalDayTokens.bodyText.opacity(0.65))
             }
@@ -964,7 +1321,7 @@ private struct SummaryCard: View {
                         .foregroundStyle(JournalDayTokens.bodyText)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    Text("Return near the end of your day to reflect on your intentions.")
+                    Text("Come back later to reflect on today's focus.")
                         .font(.custom("Nunito-Regular", size: 15))
                         .foregroundStyle(JournalDayTokens.bodyText.opacity(0.65))
                 }
@@ -989,26 +1346,37 @@ private struct SummaryCard: View {
 private struct IntroView: View {
     var ctaTitle: String
     var isEnabled: Bool = true
+    var emphasizeGenerateCTA: Bool = false
     var onTapCTA: () -> Void
 
     var body: some View {
         VStack(spacing: 20) {
-            Text("Set daily intentions and track your progress")
+            Text("Your agent is learning from today's coding flow")
                 .font(.custom("InstrumentSerif-Regular", size: 34))
                 .foregroundStyle(JournalDayTokens.sectionHeader)
                 .multilineTextAlignment(.center)
-            Text("CodeBlog helps you track your daily and longer term pursuits, gives you the space to reflect, and generates a summary of each day.")
+            Text("CodeBlog is quietly understanding today's timeline, notifications, and memory signals. You can let it keep learning, or click generate to create today's report right now.")
                 .font(.custom("Nunito-Regular", size: 16))
                 .foregroundStyle(JournalDayTokens.bodyText)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 540)
 
             if isEnabled {
-                Button(action: onTapCTA) {
-                    Text(ctaTitle).font(.custom("Nunito-SemiBold", size: 17))
+                if emphasizeGenerateCTA {
+                    Button(action: onTapCTA) {
+                        JournalGeneratePillLabel(title: ctaTitle, compact: false)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 16)
+                    .pointingHandCursor()
+                } else {
+                    Button(action: onTapCTA) {
+                        Text(ctaTitle).font(.custom("Nunito-SemiBold", size: 17))
+                    }
+                    .buttonStyle(JournalPillButtonStyle(horizontalPadding: 28, verticalPadding: 10))
+                    .padding(.top, 16)
+                    .pointingHandCursor()
                 }
-                .buttonStyle(JournalPillButtonStyle(horizontalPadding: 28, verticalPadding: 10))
-                .padding(.top, 16)
             } else {
                 Text("No journal entry for this day")
                     .font(.custom("Nunito-Regular", size: 14))
@@ -1016,6 +1384,7 @@ private struct IntroView: View {
                     .padding(.top, 16)
             }
         }
+        .padding(.horizontal, 16)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
@@ -1038,7 +1407,7 @@ private struct SummaryView: View {
             .frame(maxHeight: 300)
 
             Button(action: onTapCTA) {
-                Text("Set today's intentions")
+                Text("Edit today's focus")
                     .font(.custom("Nunito-SemiBold", size: 17))
             }
             .buttonStyle(JournalPillButtonStyle(horizontalPadding: 28, verticalPadding: 10))
@@ -1093,28 +1462,88 @@ private struct JournalDayCircleButton: View {
 
 private struct JournalDaySegmentedControl: View {
     @Binding var selection: JournalDayViewPeriod
+    @State private var hoveredOption: JournalDayViewPeriod?
+    @State private var pulseSelection: JournalDayViewPeriod = .day
+    @State private var pulseScale: CGFloat = 1.0
+
     var body: some View {
-        HStack(alignment: .center, spacing: 2) {
-            ForEach(JournalDayViewPeriod.allCases) { option in
-                Button(action: { selection = option }) {
-                    Text(option.rawValue)
-                        .font(.custom("Nunito-Regular", size: 12))
-                        .tracking(-0.12)
-                        .foregroundStyle(selection == option ? Color.white : JournalDayTokens.segmentInactiveText)
-                        .padding(.horizontal, 14).padding(.vertical, 4)
-                        .frame(width: 64, alignment: .center)
-                        .background(selection == option ? JournalDayTokens.segmentActiveFill : JournalDayTokens.segmentInactiveFill)
-                        .cornerRadius(200)
+        GeometryReader { proxy in
+            let inset: CGFloat = 2
+            let trackWidth = proxy.size.width - (inset * 2)
+            let segmentWidth = trackWidth / CGFloat(max(JournalDayViewPeriod.allCases.count, 1))
+            let selectedIndex = CGFloat(JournalDayViewPeriod.allCases.firstIndex(of: selection) ?? 0)
+
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(JournalDayTokens.segmentContainerFill)
+                    .overlay(
+                        Capsule()
+                            .inset(by: 0.5)
+                            .stroke(Color.white.opacity(0.6), lineWidth: 1)
+                    )
+
+                Capsule()
+                    .fill(JournalDayTokens.segmentActiveFill)
+                    .frame(width: max(segmentWidth, 0), height: proxy.size.height - (inset * 2))
+                    .scaleEffect(pulseSelection == selection ? pulseScale : 1.0)
+                    .offset(x: inset + selectedIndex * segmentWidth)
+                    .animation(.easeInOut(duration: 0.15), value: selection)
+                    .animation(.easeInOut(duration: 0.12), value: pulseScale)
+
+                HStack(spacing: 0) {
+                    ForEach(JournalDayViewPeriod.allCases) { option in
+                        Button(action: {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                selection = option
+                            }
+                        }) {
+                            Text(option.rawValue)
+                                .font(.custom("Nunito-Regular", size: 12))
+                                .tracking(-0.12)
+                                .foregroundStyle(selection == option ? Color.white : JournalDayTokens.segmentInactiveText)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .background(
+                                    Group {
+                                        if hoveredOption == option && selection != option {
+                                            Capsule()
+                                                .fill(Color.white.opacity(0.42))
+                                                .padding(1.5)
+                                        }
+                                    }
+                                )
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .pointingHandCursor()
+                        .onHover { isHovering in
+                            hoveredOption = isHovering ? option : (hoveredOption == option ? nil : hoveredOption)
+                        }
+                    }
                 }
-                .buttonStyle(.plain)
-                .pointingHandCursor()
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+        }
+        .frame(width: 136, height: 30)
+        .shadow(color: Color.black.opacity(0.10), radius: 2, x: 0, y: 1)
+        .onAppear {
+            pulseSelection = selection
+        }
+        .onChange(of: selection) { _, newSelection in
+            triggerSelectionPulse(for: newSelection)
+        }
+    }
+
+    private func triggerSelectionPulse(for newSelection: JournalDayViewPeriod) {
+        pulseSelection = newSelection
+        pulseScale = 0.95
+        withAnimation(.easeOut(duration: 0.14)) {
+            pulseScale = 1.05
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+            withAnimation(.easeOut(duration: 0.16)) {
+                pulseScale = 1.0
             }
         }
-        .padding(2)
-        .background(
-            Capsule().fill(JournalDayTokens.segmentContainerFill).overlay(Capsule().inset(by: 0.5).stroke(Color.white.opacity(0.6), lineWidth: 1))
-        )
-        .shadow(color: Color.black.opacity(0.10), radius: 2, x: 0, y: 1)
     }
 }
 
@@ -1143,6 +1572,11 @@ private enum JournalDayTokens {
     static let segmentInactiveFill = Color(red: 0.95, green: 0.94, blue: 0.93)
     static let segmentInactiveText = Color(red: 0.80, green: 0.78, blue: 0.77)
     static let segmentContainerFill = Color(red: 1.0, green: 0.976, blue: 0.953)
+    static let segmentTrackFill = Color(hex: "EEE7DF")
+    static let segmentTrackStroke = Color.white.opacity(0.7)
+    static let segmentKnobFill = Color.white.opacity(0.96)
+    static let segmentKnobStroke = Color(hex: "E3DED6")
+    static let segmentSelectedText = Color(hex: "6A523E")
 }
 
 struct JournalDayView_Previews: PreviewProvider {

@@ -36,6 +36,27 @@ final class JournalDayManager: ObservableObject {
     /// Whether the day has enough timeline activity for summarization (1hr+)
     @Published private(set) var canSummarize: Bool = false
 
+    /// Whether the current day has a published daily report on CodeBlog.
+    @Published private(set) var hasPublishedDailyReportForCurrentDay: Bool = false
+
+    /// Agent reflection payload returned by web API (AI generated, not local template).
+    @Published private(set) var agentReflection: CodeBlogAPIService.AgentJournalReflectionResponse.Reflection?
+
+    /// Reflection lifecycle state from API.
+    @Published private(set) var reflectionStatus: String = "cached"
+
+    /// Reflection generation timestamp from API.
+    @Published private(set) var reflectionGeneratedAt: Date?
+
+    /// Next eligible timestamp when throttled.
+    @Published private(set) var reflectionNextEligibleAt: Date?
+
+    /// Reflection refresh loading state.
+    @Published private(set) var isRefreshingReflection: Bool = false
+
+    /// Non-blocking hint for reflection-specific errors.
+    @Published var reflectionErrorHint: String?
+
     /// Loading state for async operations
     @Published private(set) var isLoading: Bool = false
 
@@ -54,6 +75,15 @@ final class JournalDayManager: ObservableObject {
     // MARK: - Private
 
     private let storage = StorageManager.shared
+    private let api = CodeBlogAPIService.shared
+    private let reflectionCacheTTL: TimeInterval = 120
+
+    private struct ReflectionSnapshot {
+        let cachedAt: Date
+        let response: CodeBlogAPIService.AgentJournalReflectionResponse
+    }
+
+    private static var reflectionCacheByKey: [String: ReflectionSnapshot] = [:]
 
     // MARK: - Initialization
 
@@ -75,6 +105,7 @@ final class JournalDayManager: ObservableObject {
     func loadDay(_ day: String) {
         currentDay = day
         isToday = checkIsToday(day)
+        hasPublishedDailyReportForCurrentDay = !isToday
 
         // Fetch entry from storage
         entry = storage.fetchJournalEntry(forDay: day)
@@ -102,6 +133,10 @@ final class JournalDayManager: ObservableObject {
 
         // Determine initial flow state
         flowState = determineInitialFlowState()
+
+        // Show cached AI reflection immediately (SWR), then refresh in background.
+        hydrateReflectionCache(for: day)
+        Task { await refreshRemoteJournalContext(for: day, forceReflection: false) }
     }
 
     /// Navigate to the previous day
@@ -263,10 +298,18 @@ final class JournalDayManager: ObservableObject {
 
     /// CTA title for intro screen
     var ctaTitle: String {
+        if shouldShowGenerateReportCTA {
+            return "Generate today's report"
+        }
         if entry?.status == "intentions_set" || entry?.status == "complete" {
             return "Edit intentions"
         }
         return "Set today's intentions"
+    }
+
+    /// Intro mode should prioritize report generation when today's report is still missing.
+    var shouldShowGenerateReportCTA: Bool {
+        isToday && !hasPublishedDailyReportForCurrentDay
     }
 
     /// Intentions as a list of strings (for display)
@@ -369,6 +412,136 @@ final class JournalDayManager: ObservableObject {
             .split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+    }
+
+    private func reflectionCacheKey(agentId: String, dayString: String, timezone: String) -> String {
+        "\(agentId)|\(dayString)|\(timezone)"
+    }
+
+    private func hydrateReflectionCache(for dayString: String) {
+        guard let apiKey = CodeBlogTokenResolver.currentToken() else {
+            agentReflection = nil
+            reflectionStatus = "provider_unavailable"
+            reflectionGeneratedAt = nil
+            reflectionNextEligibleAt = nil
+            reflectionErrorHint = "Connect your CodeBlog account to load agent reflection."
+            return
+        }
+        Task { @MainActor in
+            guard let agentId = await resolveAgentId(apiKey: apiKey) else { return }
+            let timezone = TimeZone.current.identifier
+            let key = reflectionCacheKey(agentId: agentId, dayString: dayString, timezone: timezone)
+            guard let cached = Self.reflectionCacheByKey[key] else { return }
+            applyReflectionResponse(cached.response)
+        }
+    }
+
+    func refreshAgentReflection(force: Bool = false) async {
+        await refreshRemoteJournalContext(for: currentDay, forceReflection: force)
+    }
+
+    private func refreshRemoteJournalContext(for dayString: String, forceReflection: Bool) async {
+        guard let apiKey = CodeBlogTokenResolver.currentToken() else {
+            return
+        }
+        guard let agentId = await resolveAgentId(apiKey: apiKey) else {
+            return
+        }
+
+        let timezone = TimeZone.current.identifier
+        if dayString == currentDay && isToday {
+            hasPublishedDailyReportForCurrentDay = await resolveDailyReportPublished(
+                dayString: dayString,
+                apiKey: apiKey
+            )
+        }
+
+        let cacheKey = reflectionCacheKey(agentId: agentId, dayString: dayString, timezone: timezone)
+        if let cached = Self.reflectionCacheByKey[cacheKey] {
+            applyReflectionResponse(cached.response)
+            if !forceReflection,
+               Date().timeIntervalSince(cached.cachedAt) <= reflectionCacheTTL {
+                return
+            }
+        }
+
+        isRefreshingReflection = true
+        defer { isRefreshingReflection = false }
+
+        do {
+            let response = try await api.getAgentJournalReflection(
+                apiKey: apiKey,
+                agentId: agentId,
+                date: dayString,
+                timezone: timezone,
+                force: forceReflection
+            )
+
+            guard dayString == currentDay else { return }
+            applyReflectionResponse(response)
+            Self.reflectionCacheByKey[cacheKey] = ReflectionSnapshot(
+                cachedAt: Date(),
+                response: response
+            )
+        } catch {
+            guard dayString == currentDay else { return }
+            if agentReflection == nil {
+                reflectionStatus = "provider_unavailable"
+            }
+            reflectionErrorHint = error.localizedDescription
+        }
+    }
+
+    private func applyReflectionResponse(_ response: CodeBlogAPIService.AgentJournalReflectionResponse) {
+        agentReflection = response.reflection
+        reflectionStatus = response.status
+        reflectionGeneratedAt = parseISODate(response.generated_at)
+        reflectionNextEligibleAt = parseISODate(response.next_eligible_at)
+        let trimmed = response.error_hint?.trimmingCharacters(in: .whitespacesAndNewlines)
+        reflectionErrorHint = (trimmed?.isEmpty == false) ? trimmed : nil
+    }
+
+    private func parseISODate(_ text: String?) -> Date? {
+        guard let text else { return nil }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = formatter.date(from: text) {
+            return date
+        }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: text)
+    }
+
+    private func resolveDailyReportPublished(dayString: String, apiKey: String) async -> Bool {
+        do {
+            let report = try await api.getDailyReport(apiKey: apiKey, date: dayString)
+            if let postId = report.post_id?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !postId.isEmpty {
+                return true
+            }
+            return false
+        } catch {
+            return false
+        }
+    }
+
+    private func resolveAgentId(apiKey: String) async -> String? {
+        if let stored = UserDefaults.standard.string(forKey: "codeblog_agent_id")?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !stored.isEmpty {
+            return stored
+        }
+
+        do {
+            let agents = try await api.listAgents(apiKey: apiKey)
+            guard let current = agents.first(where: { $0.is_current }) ?? agents.first else {
+                return nil
+            }
+            UserDefaults.standard.set(current.id, forKey: "codeblog_agent_id")
+            return current.id
+        } catch {
+            return nil
+        }
     }
 
     // MARK: - Summary Generation
