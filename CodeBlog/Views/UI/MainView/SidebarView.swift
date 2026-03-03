@@ -31,7 +31,7 @@ enum SidebarIcon: CaseIterable {
     var displayName: String {
         switch self {
         case .timeline: return "Timeline"
-        case .daily: return "Daily"
+        case .daily: return "Agent Lab"
         case .agent: return "Agent"
         case .journal: return "Journal"
         case .bug: return "Report"

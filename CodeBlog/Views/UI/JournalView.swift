@@ -214,7 +214,7 @@ struct JournalView: View {
     @ViewBuilder
     var unlockedContent: some View {
         if hasCompletedOnboarding {
-            // Main journal view
+            // Keep Dayflow journal experience as the primary shell.
             JournalDayView(
                 onSetReminders: { showRemindersSheet = true }
             )
@@ -332,7 +332,7 @@ struct JournalOnboardingVideoView: View {
     @State private var statusObservation: NSKeyValueObservation?
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .topTrailing) {
             // Black background in case video doesn't load
             Color.black.ignoresSafeArea()
 
@@ -340,6 +340,28 @@ struct JournalOnboardingVideoView: View {
                 JournalVideoPlayerView(player: player)
                     .ignoresSafeArea()
             }
+
+            Button {
+                completeVideo()
+            } label: {
+                Text("Skip")
+                    .font(.custom("Nunito-SemiBold", size: 13))
+                    .foregroundStyle(Color.white.opacity(0.92))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(Color.black.opacity(0.46))
+                    )
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .stroke(Color.white.opacity(0.35), lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+            .pointingHandCursor()
+            .padding(.top, 22)
+            .padding(.trailing, 22)
         }
         .onAppear {
             setupVideo()

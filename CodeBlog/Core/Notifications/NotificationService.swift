@@ -164,6 +164,27 @@ extension NotificationService: UNUserNotificationCenterDelegate {
     ) {
         let identifier = response.notification.request.identifier
 
+        if identifier.hasPrefix("agent.daily-report.") {
+            let postId = response.notification.request.content.userInfo["postId"] as? String
+            Task { @MainActor in
+                NotificationCenter.default.post(name: .navigateToJournal, object: nil)
+                let userInfo = postId.map { ["postId": $0] }
+                NotificationCenter.default.post(
+                    name: .agentDailyReportPublished,
+                    object: nil,
+                    userInfo: userInfo
+                )
+                NSApp.activate(ignoringOtherApps: true)
+                let showDockIcon = UserDefaults.standard.object(forKey: "showDockIcon") as? Bool ?? true
+                if showDockIcon && NSApp.activationPolicy() == .accessory {
+                    NSApp.setActivationPolicy(.regular)
+                }
+                NSApp.windows.first?.makeKeyAndOrderFront(nil)
+            }
+            completionHandler()
+            return
+        }
+
         if identifier.hasPrefix("agent.heartbeat.") {
             let previewId = response.notification.request.content.userInfo["previewId"] as? String ?? ""
             Task { @MainActor in
@@ -220,7 +241,20 @@ extension NotificationService: UNUserNotificationCenterDelegate {
         let identifier = notification.request.identifier
         print("[NotificationService] willPresent called for: \(identifier)")
 
+        if identifier.hasPrefix("agent.daily-report.") {
+            if UserDefaults.standard.bool(forKey: "agentNotificationsMuted") {
+                completionHandler([])
+                return
+            }
+            completionHandler([.banner, .sound])
+            return
+        }
+
         if identifier.hasPrefix("agent.heartbeat.") {
+            if UserDefaults.standard.bool(forKey: "agentNotificationsMuted") {
+                completionHandler([])
+                return
+            }
             completionHandler([.banner, .sound])
             return
         }

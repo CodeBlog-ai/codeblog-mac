@@ -52,6 +52,11 @@ extension MainView {
     }
 
     private func mainLayoutWithLifecycleEvents<Content: View>(_ content: Content) -> some View {
+        let lifecycleBound = attachLifecycleObservers(content)
+        return attachNotificationObservers(lifecycleBound)
+    }
+
+    private func attachLifecycleObservers<Content: View>(_ content: Content) -> some View {
         content
             .onAppear {
                 if isFirstLaunchAfterOnboarding {
@@ -75,45 +80,34 @@ extension MainView {
                         AnalyticsService.shared.capture("timeline_viewed", ["date_bucket": dayString(selectedDate)])
                     }
                 }
-                // Orchestrated entrance animations following Emil Kowalski principles
-                // Fast, under 300ms, natural spring motion
 
-                // Logo appears first with scale and fade
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.8, blendDuration: 0)) {
                     logoScale = 1.0
                     logoOpacity = 1
                 }
 
-                // Timeline text slides in from left
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.8, blendDuration: 0).delay(0.1)) {
                     timelineOffset = 0
                     timelineOpacity = 1
                 }
 
-                // Sidebar slides up
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.8, blendDuration: 0).delay(0.15)) {
                     sidebarOffset = 0
                     sidebarOpacity = 1
                 }
 
-                // Main content fades in last
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.8, blendDuration: 0).delay(0.2)) {
                     contentOpacity = 1
                 }
 
-                // Perform initial scroll to current time on cold start
                 if !didInitialScroll {
                     performInitialScrollIfNeeded()
                 }
 
-                // Start minute-level tick to detect timeline-day rollover (4am boundary)
                 startDayChangeTimer()
-
-                // Load weekly activity hours
                 loadWeeklyTrackedMinutes()
                 updateCardsToReviewCount()
             }
-            // Trigger reset when idle fired and timeline is visible
             .onChange(of: inactivity.pendingReset) { _, fired in
                 if fired, selectedIcon != .settings {
                     performIdleResetAndScroll()
@@ -121,12 +115,10 @@ extension MainView {
                 }
             }
             .onChange(of: selectedIcon) { _, newIcon in
-                // Clear journal notification badge when navigating to journal
                 if newIcon == .journal {
                     NotificationBadgeManager.shared.clearBadge()
                 }
 
-                // tab selected + screen viewed
                 let tabName: String
                 switch newIcon {
                 case .timeline: tabName = "timeline"
@@ -137,7 +129,6 @@ extension MainView {
                 case .settings: tabName = "settings"
                 }
 
-                // Add Sentry context for app state tracking
                 SentryHelper.configureScope { scope in
                     scope.setContext(value: [
                         "active_view": tabName,
@@ -146,7 +137,6 @@ extension MainView {
                     ], key: "app_state")
                 }
 
-                // Add breadcrumb for view navigation
                 let navBreadcrumb = Breadcrumb(level: .info, category: "navigation")
                 navBreadcrumb.message = "Navigated to \(tabName)"
                 navBreadcrumb.data = ["view": tabName]
@@ -159,41 +149,81 @@ extension MainView {
                         AnalyticsService.shared.capture("timeline_viewed", ["date_bucket": dayString(selectedDate)])
                     }
                     updateCardsToReviewCount()
+                } else if newIcon == .daily {
+                    let prewarmModel = AgentDailyViewModel()
+                    prewarmModel.loadCached(for: selectedDate)
+                } else if newIcon == .journal {
+                    Task { @MainActor in
+                        let prewarmWeekly = JournalWeeklyViewModel()
+                        await prewarmWeekly.refresh(forceRemote: false)
+                    }
                 } else {
                     showTimelineReview = false
                 }
             }
-            // Handle navigation from journal reminder notification tap
+            .onChange(of: selectedDate) { _, newDate in
+                if let method = lastDateNavMethod, method == "picker" {
+                    AnalyticsService.shared.capture("date_navigation", [
+                        "method": method,
+                        "from_day": dayString(previousDate),
+                        "to_day": dayString(newDate)
+                    ])
+                }
+                previousDate = newDate
+                AnalyticsService.shared.withSampling(probability: 0.01) {
+                    AnalyticsService.shared.capture("timeline_viewed", ["date_bucket": dayString(newDate)])
+                }
+                updateCardsToReviewCount()
+            }
+            .onChange(of: refreshActivitiesTrigger) {
+                updateCardsToReviewCount()
+            }
+            .onChange(of: selectedActivity?.id) {
+                dismissFeedbackModal(animated: false)
+                guard let a = selectedActivity else { return }
+                let dur = a.endTime.timeIntervalSince(a.startTime)
+                AnalyticsService.shared.capture("activity_card_opened", [
+                    "activity_type": a.category,
+                    "duration_bucket": AnalyticsService.shared.secondsBucket(dur),
+                    "has_video": a.videoSummaryURL != nil
+                ])
+            }
+            .onChange(of: selectedIcon) { _, newIcon in
+                if newIcon != .settings, inactivity.pendingReset {
+                    performIdleResetAndScroll()
+                    InactivityMonitor.shared.markHandledIfPending()
+                }
+            }
+            .onDisappear {
+                stopDayChangeTimer()
+                copyTimelineTask?.cancel()
+            }
+    }
+
+    private func attachNotificationObservers<Content: View>(_ content: Content) -> some View {
+        content
             .onReceive(NotificationCenter.default.publisher(for: .navigateToJournal)) { _ in
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) {
                     selectedIcon = .journal
                 }
             }
-            // Handle "Open Timeline" from menu bar
+            .onReceive(NotificationCenter.default.publisher(for: .agentDailyReportPublished)) { _ in
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) {
+                    selectedIcon = .journal
+                }
+            }
             .onReceive(NotificationCenter.default.publisher(for: .navigateToTimeline)) { _ in
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) {
                     selectedIcon = .timeline
                 }
             }
-            // Handle navigation from Agent heartbeat notification tap
             .onReceive(NotificationCenter.default.publisher(for: .navigateToAgentPost)) { notification in
-                let previewId = notification.userInfo?["previewId"] as? String ?? ""
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) {
-                    selectedIcon = .timeline
-                    selectedDate = Date()
-                }
-                // 触发 timeline 刷新；previewId 留给未来精准定位使用
-                refreshActivitiesTrigger &+= 1
-                print("[Layout] navigateToAgentPost previewId=\(previewId)")
+                handleNavigateToAgentPost(notification)
             }
-            // Handle inject agent post to chat
             .onReceive(NotificationCenter.default.publisher(for: .injectAgentPostToChat)) { notification in
                 let title = notification.userInfo?["title"] as? String ?? ""
                 let content = notification.userInfo?["content"] as? String ?? ""
                 let type = notification.userInfo?["cardType"] as? String ?? "post"
-                // Schedule the card chat on the service first, before the tab switch.
-                // If ChatView isn't mounted yet (coming from timeline tab), its onAppear
-                // will call fireCardTriggerIfNeeded() once it's live.
                 ChatService.shared.scheduleCardChat(title: title, content: content, type: type)
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) {
                     showTimelineReview = false
@@ -221,54 +251,11 @@ extension MainView {
 
                 updateCardsToReviewCount()
             }
-            .onChange(of: selectedDate) { _, newDate in
-                // If changed via picker, emit navigation now
-                if let method = lastDateNavMethod, method == "picker" {
-                    AnalyticsService.shared.capture("date_navigation", [
-                        "method": method,
-                        "from_day": dayString(previousDate),
-                        "to_day": dayString(newDate)
-                    ])
-                }
-                previousDate = newDate
-                AnalyticsService.shared.withSampling(probability: 0.01) {
-                    AnalyticsService.shared.capture("timeline_viewed", ["date_bucket": dayString(newDate)])
-                }
-                updateCardsToReviewCount()
-            }
-            .onChange(of: refreshActivitiesTrigger) {
-                updateCardsToReviewCount()
-            }
-            .onChange(of: selectedActivity?.id) {
-                dismissFeedbackModal(animated: false)
-                guard let a = selectedActivity else { return }
-                let dur = a.endTime.timeIntervalSince(a.startTime)
-                AnalyticsService.shared.capture("activity_card_opened", [
-                    "activity_type": a.category,
-                    "duration_bucket": AnalyticsService.shared.secondsBucket(dur),
-                    "has_video": a.videoSummaryURL != nil
-                ])
-            }
-            // If user returns from Settings and a reset was pending, perform it once
-            .onChange(of: selectedIcon) { _, newIcon in
-                if newIcon != .settings, inactivity.pendingReset {
-                    performIdleResetAndScroll()
-                    InactivityMonitor.shared.markHandledIfPending()
-                }
-            }
-            .onDisappear {
-                // Safety: stop timer if view disappears
-                stopDayChangeTimer()
-                copyTimelineTask?.cancel()
-            }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-                // Check if day changed while app was backgrounded
                 handleMinuteTickForDayChange()
-                // Ensure timer is running
                 if dayChangeTimer == nil {
                     startDayChangeTimer()
                 }
-                // Refresh weekly hours in case activities were added
                 loadWeeklyTrackedMinutes()
             }
             .overlay { categoryEditorOverlay }
@@ -291,6 +278,51 @@ extension MainView {
         withAnimation(.spring(response: 0.25, dampingFraction: 0.92)) {
             timelineFailureToastPayload = nil
         }
+    }
+
+    private func handleNavigateToAgentPost(_ notification: Notification) {
+        let rawPreviewId = (notification.userInfo?["previewId"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawDayString = (notification.userInfo?["dayString"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let fallbackDayString = DateFormatter.yyyyMMdd.string(
+            from: timelineDisplayDate(from: Date(), now: Date())
+        )
+        let targetDayString = (rawDayString?.isEmpty == false ? rawDayString : nil) ?? fallbackDayString
+        let targetDate = DateFormatter.yyyyMMdd.date(from: targetDayString) ?? Date()
+
+        var targetActivityID: String? = nil
+        if let previewId = rawPreviewId, !previewId.isEmpty {
+            targetActivityID = resolveTimelineActivityId(previewId: previewId, dayString: targetDayString)
+        }
+
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) {
+            showTimelineReview = false
+            selectedIcon = .timeline
+            selectedDate = normalizedTimelineDate(targetDate)
+        }
+        reviewInitialActivityId = targetActivityID
+        refreshActivitiesTrigger &+= 1
+
+        guard targetActivityID != nil else { return }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                showTimelineReview = true
+            }
+        }
+    }
+
+    private func resolveTimelineActivityId(previewId: String, dayString: String) -> String? {
+        let cards = StorageManager.shared.fetchTimelineCards(forDay: dayString)
+        guard let matched = cards.first(where: { $0.previewId == previewId }) else {
+            return nil
+        }
+        if let recordId = matched.recordId {
+            return "record:\(recordId)"
+        }
+        return nil
     }
 
     private var contentStack: some View {

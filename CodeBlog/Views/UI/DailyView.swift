@@ -21,15 +21,20 @@ private enum DailyGridConfig {
     static let slotDurationMinutes: Double = 15
     static let fallbackCategoryNames = ["Research", "Design", "Alignment", "Testing", "General"]
     static let fallbackColorHexes = ["5E90D9", "A166DB", "4BBFB7", "F38565", "8B8480"]
+    static let agentCategoryNames = ["Browse", "Review", "Comment", "Vote", "Post", "Chat"]
+    static let agentColorHexes = ["5E90D9", "A166DB", "4BBFB7", "F38565", "F96E00", "8B8480"]
 }
 
 private enum DailyStandupCopyState: Equatable {
     case idle
+    case syncing
     case copied
 }
 
 struct DailyView: View {
     @AppStorage("isDailyUnlocked") private var isUnlocked: Bool = false
+    @AppStorage("useAgentDailyDataView") private var useAgentDailyDataView: Bool = true
+    @AppStorage("agentNotificationsMuted") private var agentNotificationsMuted: Bool = false
     @Binding var selectedDate: Date
     @EnvironmentObject private var categoryStore: CategoryStore
     @Environment(\.openURL) private var openURL
@@ -46,6 +51,20 @@ struct DailyView: View {
     @State private var standupDraftSaveTask: Task<Void, Never>? = nil
     @State private var standupCopyState: DailyStandupCopyState = .idle
     @State private var standupCopyResetTask: Task<Void, Never>? = nil
+    @StateObject private var agentDailyViewModel = AgentDailyViewModel()
+    @State private var isApplyingAgentDraft: Bool = false
+    @State private var agentActiveMode: DailyModeToggle.ActiveMode = .highlights
+    @State private var agentNotificationsTitle: String = "Notifications"
+    @State private var agentNotificationsItems: [DailyBulletItem] = []
+    @State private var agentNotesTitle: String = "Agent notes"
+    @State private var agentNotesItems: [DailyBulletItem] = []
+    @State private var agentMemoryTitle: String = "Agent memory"
+    @State private var agentMemoryItems: [DailyBulletItem] = []
+    @State private var agentPendingReviewEntries: [AgentReviewEntry] = []
+    @State private var agentRejectedReviewEntries: [AgentReviewEntry] = []
+    @State private var reviewActionInFlight: Set<String> = []
+    @State private var showsAgentEventsPanel: Bool = false
+    @State private var highlightedAgentEvent: AgentActivityHighlight?
 
     private let requiredCodeHash = "6979ce2825cb3f440f987bbc487d62087c333abb99b56062c561ca557392d960"
     private let betaNoticeCopy = "CodeBlog Daily visualizes your coding day and turns it into a standup update fast."
@@ -227,7 +246,7 @@ struct DailyView: View {
                         useSingleColumn: useSingleColumn,
                         contentWidth: contentWidth,
                         scale: scale,
-                        showData: !isViewingToday
+                        showData: useAgentDailyDataView ? true : !isViewingToday
                     )
                 }
                 .frame(width: contentWidth, alignment: .leading)
@@ -239,6 +258,9 @@ struct DailyView: View {
         }
         .onAppear {
             refreshWorkflowData()
+            if useAgentDailyDataView {
+                loadCachedAgentDailyData()
+            }
         }
         .onDisappear {
             workflowLoadTask?.cancel()
@@ -250,8 +272,15 @@ struct DailyView: View {
         }
         .onChange(of: selectedDate) { _, _ in
             refreshWorkflowData()
+            highlightedAgentEvent = nil
+            if useAgentDailyDataView {
+                loadCachedAgentDailyData()
+            }
         }
         .onChange(of: standupDraft) { _, _ in
+            if useAgentDailyDataView || isApplyingAgentDraft {
+                return
+            }
             scheduleStandupDraftSave()
         }
         .onReceive(NotificationCenter.default.publisher(for: .timelineDataUpdated)) { notification in
@@ -260,6 +289,18 @@ struct DailyView: View {
             }
             if dayString == workflowDayString(for: selectedDate) {
                 refreshWorkflowData()
+                if useAgentDailyDataView {
+                    loadCachedAgentDailyData()
+                }
+            }
+        }
+        .sheet(isPresented: $showsAgentEventsPanel) {
+            AgentEventsPanel(
+                dateTitle: dailyDateTitle(for: selectedDate),
+                events: buildAgentEventPanelItems()
+            ) { selection in
+                highlightedAgentEvent = selection
+                showsAgentEventsPanel = false
             }
         }
     }
@@ -320,9 +361,14 @@ struct DailyView: View {
     }
 
     private func workflowSection(scale: CGFloat, isViewingToday: Bool) -> some View {
-        let headingText = isViewingToday
-            ? "Come back tomorrow to see this filled out."
-            : "Your workflow yesterday"
+        let headingText: String
+        if useAgentDailyDataView {
+            headingText = "Agent activity timeline"
+        } else {
+            headingText = isViewingToday
+                ? "Come back tomorrow to see this filled out."
+                : "Your workflow yesterday"
+        }
 
         return VStack(alignment: .leading, spacing: 8 * scale) {
             HStack {
@@ -332,11 +378,15 @@ struct DailyView: View {
 
                 Spacer()
 
-                Button(action: {}) {
+                Button {
+                    if useAgentDailyDataView {
+                        showsAgentEventsPanel = true
+                    }
+                } label: {
                     HStack(spacing: 4 * scale) {
-                        Image(systemName: "pencil")
+                        Image(systemName: useAgentDailyDataView ? "waveform.path.ecg" : "pencil")
                             .font(.system(size: 9 * scale, weight: .medium))
-                        Text("Edit categories")
+                        Text(useAgentDailyDataView ? "Agent events" : "Edit categories")
                             .font(.custom("Nunito-Regular", size: 10 * scale))
                     }
                     .padding(.horizontal, 10 * scale)
@@ -356,7 +406,13 @@ struct DailyView: View {
             }
 
             VStack(spacing: 0) {
-                DailyWorkflowGrid(rows: workflowRows, timelineWindow: workflowWindow, scale: scale)
+                DailyWorkflowGrid(
+                    rows: workflowRows,
+                    timelineWindow: workflowWindow,
+                    scale: scale,
+                    highlightedCategoryKey: highlightedAgentEvent?.categoryKey,
+                    highlightedSlotRange: highlightedAgentEvent?.slotRange
+                )
 
                 Divider()
                     .overlay(Color(hex: "E5DFD9"))
@@ -379,7 +435,34 @@ struct DailyView: View {
 
     private func workflowTotalsView(scale: CGFloat, isViewingToday: Bool) -> some View {
         Group {
-            if isViewingToday {
+            if useAgentDailyDataView {
+                if workflowTotals.isEmpty || workflowTotals.allSatisfy({ $0.minutes == 0 }) {
+                    Text("No agent activity events for this day yet.")
+                        .font(.custom("Nunito-Regular", size: 12 * scale))
+                        .foregroundStyle(Color(hex: "7F7062"))
+                } else {
+                    HStack(spacing: 8 * scale) {
+                        Text("Agent activity")
+                            .font(.custom("InstrumentSerif-Regular", size: 14 * scale))
+                            .foregroundStyle(Color(hex: "777777"))
+
+                        ForEach(workflowTotals) { total in
+                            if total.minutes > 0 {
+                                HStack(spacing: 2 * scale) {
+                                    Text(total.name)
+                                        .font(.custom("Nunito-Regular", size: 12 * scale))
+                                        .foregroundStyle(Color(hex: "1F1B18"))
+                                    Text("\(Int(total.minutes)) events")
+                                        .font(.custom("Nunito-SemiBold", size: 12 * scale))
+                                        .foregroundStyle(Color(hex: total.colorHex))
+                                }
+                            }
+                        }
+                    }
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                }
+            } else if isViewingToday {
                 Text("Yesterday's total")
                     .font(.custom("InstrumentSerif-Regular", size: 14 * scale))
                     .foregroundStyle(Color(hex: "777777"))
@@ -412,57 +495,134 @@ struct DailyView: View {
 
     @ViewBuilder
     private func actionRow(useSingleColumn: Bool, scale: CGFloat) -> some View {
+        let leadingToggleText = useAgentDailyDataView ? "Notes" : "Highlights"
+        let trailingToggleText = useAgentDailyDataView ? "Memory" : "Details"
+        let onSelect: ((DailyModeToggle.ActiveMode) -> Void)? = useAgentDailyDataView ? { mode in
+            withAnimation(.easeInOut(duration: 0.2)) {
+                agentActiveMode = mode
+            }
+        } : nil
+
         if useSingleColumn {
             VStack(alignment: .leading, spacing: 10 * scale) {
-                DailyModeToggle(activeMode: .highlights, scale: scale)
-                standupCopyButton(scale: scale)
+                DailyModeToggle(
+                    activeMode: useAgentDailyDataView ? agentActiveMode : .highlights,
+                    scale: scale,
+                    leadingText: leadingToggleText,
+                    trailingText: trailingToggleText,
+                    onSelect: onSelect
+                )
+                syncActionCluster(scale: scale)
             }
         } else {
-            HStack {
-                DailyModeToggle(activeMode: .highlights, scale: scale)
+            HStack(alignment: .top) {
+                DailyModeToggle(
+                    activeMode: useAgentDailyDataView ? agentActiveMode : .highlights,
+                    scale: scale,
+                    leadingText: leadingToggleText,
+                    trailingText: trailingToggleText,
+                    onSelect: onSelect
+                )
                 Spacer()
-                standupCopyButton(scale: scale)
+                syncActionCluster(scale: scale)
             }
         }
     }
 
+    @ViewBuilder
+    private func syncActionCluster(scale: CGFloat) -> some View {
+        standupCopyButton(scale: scale)
+    }
+
+    private func agentNotificationMuteInlineButton(scale: CGFloat) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                agentNotificationsMuted.toggle()
+            }
+        } label: {
+            Image(systemName: agentNotificationsMuted ? "bell.slash.fill" : "bell.fill")
+                .font(.system(size: 11 * scale, weight: .semibold))
+                .foregroundStyle(agentNotificationsMuted ? Color(hex: "B64C38") : Color(hex: "7A6A5D"))
+                .padding(.horizontal, 9 * scale)
+                .padding(.vertical, 6 * scale)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(Color(hex: "FFF6EE"))
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(
+                            agentNotificationsMuted ? Color(hex: "E7B7A9") : Color(hex: "E9D8CB"),
+                            lineWidth: max(0.7, 1 * scale)
+                        )
+                )
+                .contentTransition(.symbolEffect(.replace))
+                .animation(.easeInOut(duration: 0.2), value: agentNotificationsMuted)
+        }
+        .buttonStyle(.plain)
+        .pointingHandCursorOnHover(reassertOnPressEnd: true)
+        .accessibilityLabel(Text("Mute agent system notifications"))
+    }
+
+    private func notificationsHeaderAccessory(scale: CGFloat) -> AnyView? {
+        guard useAgentDailyDataView else { return nil }
+        return AnyView(
+            agentNotificationMuteInlineButton(scale: scale)
+        )
+    }
+
     private func standupCopyButton(scale: CGFloat) -> some View {
         let transition = AnyTransition.opacity.combined(with: .scale(scale: 0.5))
+        let isSyncing = useAgentDailyDataView && (agentDailyViewModel.isLoading || standupCopyState == .syncing)
+        let isSynced = standupCopyState == .copied
+        let buttonLabelText: String = {
+            if useAgentDailyDataView {
+                if isSyncing { return "Syncing with Agent" }
+                if isSynced { return "Synced" }
+                return "Sync with Agent"
+            }
+            return isSynced ? "Copied" : "Copy standup update"
+        }()
+        let accessibilityText: String = {
+            if useAgentDailyDataView {
+                if isSyncing { return "Syncing agent data" }
+                if isSynced { return "Agent data synced" }
+                return "Sync agent data"
+            }
+            return isSynced ? "Copied standup update" : "Copy standup update"
+        }()
 
-        return Button(action: copyStandupUpdateToClipboard) {
+        return Button(action: {
+            if useAgentDailyDataView {
+                refreshAgentDailyData(forceRemote: true, showFeedback: true)
+            } else {
+                copyStandupUpdateToClipboard()
+            }
+        }) {
             HStack(spacing: 6 * scale) {
                 ZStack {
-                    if standupCopyState == .copied {
+                    if isSynced {
                         Image(systemName: "checkmark")
                             .font(.system(size: 12 * scale, weight: .semibold))
                             .transition(transition)
+                    } else if isSyncing {
+                        ProgressView()
+                            .controlSize(.small)
+                            .transition(transition)
                     } else {
-                        Image("Copy")
-                            .resizable()
-                            .interpolation(.high)
-                            .renderingMode(.template)
-                            .scaledToFit()
-                            .frame(width: 16 * scale, height: 16 * scale)
+                        Image(systemName: useAgentDailyDataView ? "arrow.triangle.2.circlepath" : "doc.on.doc")
+                            .font(.system(size: 13 * scale, weight: .semibold))
                             .transition(transition)
                     }
                 }
                 .frame(width: 16 * scale, height: 16 * scale)
 
-                ZStack(alignment: .leading) {
-                    Text("Copy standup update")
-                        .font(.custom("Nunito-Medium", size: 14 * scale))
-                        .lineLimit(1)
-                        .opacity(standupCopyState == .copied ? 0 : 1)
-
-                    Text("Copied")
-                        .font(.custom("Nunito-Medium", size: 14 * scale))
-                        .lineLimit(1)
-                        .opacity(standupCopyState == .copied ? 1 : 0)
-                }
-                .frame(minWidth: 136 * scale, alignment: .leading)
+                Text(buttonLabelText)
+                    .font(.custom("Nunito-Medium", size: 14 * scale))
+                    .lineLimit(1)
             }
             .foregroundStyle(.white)
-            .padding(.horizontal, 12 * scale)
+            .padding(.horizontal, 16 * scale)
             .padding(.vertical, 10 * scale)
             .background(
                 LinearGradient(
@@ -483,67 +643,171 @@ struct DailyView: View {
         }
         .buttonStyle(DailyCopyPressButtonStyle())
         .animation(.easeInOut(duration: 0.22), value: standupCopyState)
+        .animation(.easeInOut(duration: 0.22), value: agentDailyViewModel.isLoading)
         .pointingHandCursorOnHover(reassertOnPressEnd: true)
-        .accessibilityLabel(Text(standupCopyState == .copied ? "Copied standup update" : "Copy standup update"))
+        .accessibilityLabel(Text(accessibilityText))
+    }
+
+    private func highlightsTitleBinding() -> Binding<String> {
+        if useAgentDailyDataView {
+            return $agentNotificationsTitle
+        }
+        return $standupDraft.highlightsTitle
+    }
+
+    private func highlightsItemsBinding() -> Binding<[DailyBulletItem]> {
+        if useAgentDailyDataView {
+            return $agentNotificationsItems
+        }
+        return $standupDraft.highlights
+    }
+
+    private func tasksTitleBinding() -> Binding<String> {
+        if useAgentDailyDataView {
+            return agentActiveMode == .highlights ? $agentNotesTitle : $agentMemoryTitle
+        }
+        return $standupDraft.tasksTitle
+    }
+
+    private func tasksItemsBinding() -> Binding<[DailyBulletItem]> {
+        if useAgentDailyDataView {
+            return agentActiveMode == .highlights ? $agentNotesItems : $agentMemoryItems
+        }
+        return $standupDraft.tasks
+    }
+
+    private func blockersTitleBinding() -> Binding<String> {
+        return $standupDraft.blockersTitle
+    }
+
+    private func blockersBodyBinding() -> Binding<String> {
+        return $standupDraft.blockersBody
     }
 
     @ViewBuilder
     private func highlightsAndTasksSection(useSingleColumn: Bool, contentWidth: CGFloat, scale: CGFloat, showData: Bool) -> some View {
+        let leadingReviewEntries = reviewEntriesForCurrentMode(onLeadingCard: true)
+        let trailingReviewEntries = reviewEntriesForCurrentMode(onLeadingCard: false)
+
         if useSingleColumn {
             VStack(alignment: .leading, spacing: 12 * scale) {
                 DailyBulletCard(
                     style: .highlights,
                     seamMode: .standalone,
-                    title: $standupDraft.highlightsTitle,
-                    items: $standupDraft.highlights,
+                    title: highlightsTitleBinding(),
+                    items: highlightsItemsBinding(),
                     showItems: showData,
                     addTaskLabel: $standupDraft.addTaskLabel,
-                    blockersTitle: $standupDraft.blockersTitle,
-                    blockersBody: $standupDraft.blockersBody,
-                    scale: scale
+                    blockersTitle: blockersTitleBinding(),
+                    blockersBody: blockersBodyBinding(),
+                    scale: scale,
+                    isReadOnly: useAgentDailyDataView,
+                    reviewEntries: leadingReviewEntries,
+                    reviewActionInFlight: reviewActionInFlight,
+                    reviewFeedbackMessage: agentDailyViewModel.reviewFeedbackMessage,
+                    reviewErrorMessage: agentDailyViewModel.errorMessage,
+                    onApproveReview: approveNotificationReview,
+                    onRejectReview: rejectNotificationReview,
+                    onUndoReview: undoNotificationReview,
+                    onOpenLinkedItem: openLinkedTimelineItem,
+                    showsBlockersSection: !useAgentDailyDataView,
+                    headerAccessory: notificationsHeaderAccessory(scale: scale),
+                    headerActionTitle: nil,
+                    headerActionStyle: .subtle,
+                    onHeaderAction: nil
                 )
                 DailyBulletCard(
                     style: .tasks,
                     seamMode: .standalone,
-                    title: $standupDraft.tasksTitle,
-                    items: $standupDraft.tasks,
+                    title: tasksTitleBinding(),
+                    items: tasksItemsBinding(),
                     showItems: showData,
                     addTaskLabel: $standupDraft.addTaskLabel,
-                    blockersTitle: $standupDraft.blockersTitle,
-                    blockersBody: $standupDraft.blockersBody,
-                    scale: scale
+                    blockersTitle: blockersTitleBinding(),
+                    blockersBody: blockersBodyBinding(),
+                    scale: scale,
+                    isReadOnly: useAgentDailyDataView,
+                    reviewEntries: trailingReviewEntries,
+                    reviewActionInFlight: reviewActionInFlight,
+                    reviewFeedbackMessage: agentDailyViewModel.reviewFeedbackMessage,
+                    reviewErrorMessage: agentDailyViewModel.errorMessage,
+                    onApproveReview: approveNotificationReview,
+                    onRejectReview: rejectNotificationReview,
+                    onUndoReview: undoNotificationReview,
+                    onOpenLinkedItem: openLinkedTimelineItem,
+                    showsBlockersSection: !useAgentDailyDataView,
+                    headerAccessory: nil,
+                    headerActionTitle: useAgentDailyDataView && agentActiveMode == .details ? "Memory tuning" : nil,
+                    headerActionStyle: .gradientPulse,
+                    onHeaderAction: useAgentDailyDataView && agentActiveMode == .details ? openMemoryTuningChat : nil
                 )
             }
         } else {
             // Figma overlaps borders by ~1px to avoid a visible gutter.
             let cardSpacing = -1 * scale
-            let cardWidth = (contentWidth - cardSpacing) / 2
+            let cardWidths: (leading: CGFloat, trailing: CGFloat) = {
+                if useAgentDailyDataView {
+                    let availableWidth = contentWidth - cardSpacing
+                    let leading = max(360, availableWidth * 0.58)
+                    return (leading, max(240, availableWidth - leading))
+                }
+                let equal = (contentWidth - cardSpacing) / 2
+                return (equal, equal)
+            }()
             HStack(alignment: .top, spacing: cardSpacing) {
                 DailyBulletCard(
                     style: .highlights,
                     seamMode: .joinedLeading,
-                    title: $standupDraft.highlightsTitle,
-                    items: $standupDraft.highlights,
+                    title: highlightsTitleBinding(),
+                    items: highlightsItemsBinding(),
                     showItems: showData,
                     addTaskLabel: $standupDraft.addTaskLabel,
-                    blockersTitle: $standupDraft.blockersTitle,
-                    blockersBody: $standupDraft.blockersBody,
-                    scale: scale
+                    blockersTitle: blockersTitleBinding(),
+                    blockersBody: blockersBodyBinding(),
+                    scale: scale,
+                    isReadOnly: useAgentDailyDataView,
+                    reviewEntries: leadingReviewEntries,
+                    reviewActionInFlight: reviewActionInFlight,
+                    reviewFeedbackMessage: agentDailyViewModel.reviewFeedbackMessage,
+                    reviewErrorMessage: agentDailyViewModel.errorMessage,
+                    onApproveReview: approveNotificationReview,
+                    onRejectReview: rejectNotificationReview,
+                    onUndoReview: undoNotificationReview,
+                    onOpenLinkedItem: openLinkedTimelineItem,
+                    showsBlockersSection: !useAgentDailyDataView,
+                    headerAccessory: notificationsHeaderAccessory(scale: scale),
+                    headerActionTitle: nil,
+                    headerActionStyle: .subtle,
+                    onHeaderAction: nil
                 )
-                    .frame(width: cardWidth)
+                    .frame(width: cardWidths.leading)
 
                 DailyBulletCard(
                     style: .tasks,
                     seamMode: .joinedTrailing,
-                    title: $standupDraft.tasksTitle,
-                    items: $standupDraft.tasks,
+                    title: tasksTitleBinding(),
+                    items: tasksItemsBinding(),
                     showItems: showData,
                     addTaskLabel: $standupDraft.addTaskLabel,
-                    blockersTitle: $standupDraft.blockersTitle,
-                    blockersBody: $standupDraft.blockersBody,
-                    scale: scale
+                    blockersTitle: blockersTitleBinding(),
+                    blockersBody: blockersBodyBinding(),
+                    scale: scale,
+                    isReadOnly: useAgentDailyDataView,
+                    reviewEntries: trailingReviewEntries,
+                    reviewActionInFlight: reviewActionInFlight,
+                    reviewFeedbackMessage: agentDailyViewModel.reviewFeedbackMessage,
+                    reviewErrorMessage: agentDailyViewModel.errorMessage,
+                    onApproveReview: approveNotificationReview,
+                    onRejectReview: rejectNotificationReview,
+                    onUndoReview: undoNotificationReview,
+                    onOpenLinkedItem: openLinkedTimelineItem,
+                    showsBlockersSection: !useAgentDailyDataView,
+                    headerAccessory: nil,
+                    headerActionTitle: useAgentDailyDataView && agentActiveMode == .details ? "Memory tuning" : nil,
+                    headerActionStyle: .gradientPulse,
+                    onHeaderAction: useAgentDailyDataView && agentActiveMode == .details ? openMemoryTuningChat : nil
                 )
-                    .frame(width: cardWidth)
+                    .frame(width: cardWidths.trailing)
             }
         }
     }
@@ -551,6 +815,11 @@ struct DailyView: View {
     private func refreshWorkflowData() {
         workflowLoadTask?.cancel()
         workflowLoadTask = nil
+
+        if useAgentDailyDataView {
+            applyAgentActivityToWorkflow()
+            return
+        }
 
         let dayString = workflowDayString(for: selectedDate)
         refreshStandupDraftIfNeeded(for: dayString)
@@ -602,6 +871,493 @@ struct DailyView: View {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             guard !Task.isCancelled else { return }
 
+            await MainActor.run {
+                withAnimation(.easeInOut(duration: 0.22)) {
+                    standupCopyState = .idle
+                }
+                standupCopyResetTask = nil
+            }
+        }
+    }
+
+    private func refreshAgentDailyData(forceRemote: Bool = false, showFeedback: Bool = false) {
+        if showFeedback {
+            standupCopyResetTask?.cancel()
+            withAnimation(.easeInOut(duration: 0.2)) {
+                standupCopyState = .syncing
+            }
+        }
+        Task {
+            await agentDailyViewModel.refresh(for: selectedDate, forceRemote: forceRemote)
+            applyAgentDataToDraft()
+            applyAgentActivityToWorkflow()
+            if showFeedback {
+                if agentDailyViewModel.errorMessage == nil {
+                    indicateRefreshCompleted()
+                } else {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        standupCopyState = .idle
+                    }
+                }
+            }
+        }
+    }
+
+    private func loadCachedAgentDailyData() {
+        agentDailyViewModel.loadCached(for: selectedDate)
+        applyAgentDataToDraft()
+        applyAgentActivityToWorkflow()
+    }
+
+    private func applyAgentDataToDraft() {
+        guard useAgentDailyDataView else { return }
+
+        isApplyingAgentDraft = true
+        defer { isApplyingAgentDraft = false }
+
+        let pendingEntries = agentDailyViewModel.pendingReviews.prefix(6).map {
+            buildReviewEntry(from: $0, isRejected: false)
+        }
+        let rejectedEntries = agentDailyViewModel.rejectedReviews.prefix(4).map {
+            buildReviewEntry(from: $0, isRejected: true)
+        }
+
+        agentPendingReviewEntries = pendingEntries
+        agentRejectedReviewEntries = rejectedEntries
+
+        let pendingItems: [DailyBulletItem]
+        if pendingEntries.isEmpty && rejectedEntries.isEmpty {
+            pendingItems = [
+                DailyBulletItem(
+                    title: "No notifications",
+                    body: "No pending notification items for this date."
+                )
+            ]
+        } else {
+            var mapped: [DailyBulletItem] = pendingEntries.map {
+                DailyBulletItem(title: $0.title, body: $0.body)
+            }
+            if !rejectedEntries.isEmpty {
+                mapped.append(contentsOf: rejectedEntries.map {
+                    DailyBulletItem(title: "\($0.title) (Rejected)", body: $0.body)
+                })
+            }
+            pendingItems = mapped
+        }
+
+        let noteItems: [DailyBulletItem]
+        if agentDailyViewModel.notes.isEmpty {
+            noteItems = [
+                DailyBulletItem(
+                    title: "No agent notes yet",
+                    body: "No local agent cards found for this date.",
+                    meta: nil,
+                    linkedPreviewId: nil,
+                    linkedDayString: nil
+                )
+            ]
+        } else {
+            noteItems = agentDailyViewModel.notes.prefix(6).map { note in
+                let summary = note.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+                let metadata = "\(note.cardType.uppercased()) · \(note.time)"
+                return DailyBulletItem(
+                    title: note.title.trimmingCharacters(in: .whitespacesAndNewlines),
+                    body: summary.isEmpty ? "No summary available." : summary,
+                    meta: metadata,
+                    linkedPreviewId: note.previewId,
+                    linkedDayString: note.dayString
+                )
+            }
+        }
+
+        let memoryItems = buildAgentMemoryItems()
+
+        agentNotificationsTitle = "Notifications"
+        agentNotificationsItems = pendingItems
+        agentNotesTitle = "Agent notes"
+        agentNotesItems = noteItems
+        agentMemoryTitle = "Agent memory"
+        agentMemoryItems = memoryItems
+    }
+
+    private func applyAgentActivityToWorkflow() {
+        guard useAgentDailyDataView else { return }
+
+        guard let activity = agentDailyViewModel.activity else {
+            workflowWindow = .placeholder
+            workflowTotals = []
+            workflowStats = DailyWorkflowStatChip.placeholder
+            workflowRows = DailyGridConfig.agentCategoryNames.enumerated().map { index, name in
+                DailyWorkflowGridRow(
+                    id: "agent-placeholder-\(index)",
+                    name: name,
+                    colorHex: DailyGridConfig.agentColorHexes[index % DailyGridConfig.agentColorHexes.count],
+                    slotOccupancies: Array(repeating: 0, count: workflowWindow.slotCount)
+                )
+            }
+            return
+        }
+
+        let maxCount = max(
+            activity.rows.flatMap(\.slot_counts).max() ?? 1,
+            1
+        )
+
+        workflowWindow = DailyWorkflowTimelineWindow(
+            startMinute: Double(activity.start_minute),
+            endMinute: Double(activity.end_minute)
+        )
+        workflowRows = activity.rows.map { row in
+            DailyWorkflowGridRow(
+                id: row.key,
+                name: row.label,
+                colorHex: row.color_hex,
+                slotOccupancies: row.slot_counts.map { count in
+                    guard count > 0 else { return 0 }
+                    return min(1, Double(count) / Double(maxCount))
+                }
+            )
+        }
+        workflowTotals = activity.totals.map { total in
+            DailyWorkflowTotalItem(
+                id: total.key,
+                name: total.label,
+                minutes: Double(total.total_events),
+                colorHex: total.color_hex
+            )
+        }
+        workflowStats = [
+            DailyWorkflowStatChip(
+                id: "event-count",
+                title: "Events",
+                value: "\(workflowTotals.reduce(0) { $0 + Int($1.minutes) })"
+            ),
+            DailyWorkflowStatChip(
+                id: "active-categories",
+                title: "Active categories",
+                value: "\(workflowTotals.filter { $0.minutes > 0 }.count)"
+            ),
+            DailyWorkflowStatChip(
+                id: "window",
+                title: "Window",
+                value: "\(formatAxisHourLabel(fromAbsoluteHour: Int(activity.start_minute / 60)))-\(formatAxisHourLabel(fromAbsoluteHour: Int(activity.end_minute / 60)))"
+            )
+        ]
+    }
+
+    private func buildReviewEntry(
+        from notification: CodeBlogAPIService.NotificationItem,
+        isRejected: Bool
+    ) -> AgentReviewEntry {
+        let postID = (notification.comment_post_id ?? notification.post_id)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = agentDailyViewModel.postTitle(for: notification)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedTitle = (title?.isEmpty == false ? title : nil) ?? "Post awaiting review"
+        let content = (notification.comment_content ?? notification.message)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return AgentReviewEntry(
+            id: notification.id,
+            title: resolvedTitle,
+            body: content.isEmpty ? "No comment preview available." : content,
+            isRejected: isRejected,
+            postId: postID
+        )
+    }
+
+    private func buildAgentMemoryItems() -> [DailyBulletItem] {
+        var items: [DailyBulletItem] = []
+
+        if let profile = agentDailyViewModel.memoryProfileV2 {
+            appendMemoryGroup(
+                title: "Thoughts",
+                values: profile.thoughts,
+                body: "How your agent currently interprets your direction.",
+                into: &items
+            )
+            appendMemoryGroup(
+                title: "Tone",
+                values: profile.tone,
+                body: "How your preferred communication style is evolving.",
+                into: &items
+            )
+            appendMemoryGroup(
+                title: "Preferences",
+                values: profile.preferences,
+                body: "What topics and response patterns your agent now prioritizes.",
+                into: &items
+            )
+            appendMemoryGroup(
+                title: "Habits",
+                values: profile.habits,
+                body: "Recurring collaboration patterns your agent has learned.",
+                into: &items
+            )
+            appendMemoryGroup(
+                title: "Recent context",
+                values: profile.recent,
+                body: "Recent signals that shaped the latest behavior.",
+                into: &items
+            )
+            appendMemoryGroup(
+                title: "Tech stack",
+                values: profile.tech_stack,
+                body: "Technologies your current conversations focus on.",
+                into: &items
+            )
+
+            let note = profile.agent_note.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !note.isEmpty {
+                items.append(
+                    DailyBulletItem(
+                        title: "Agent self-note",
+                        body: note,
+                        meta: "Updated \(profile.updated_at)",
+                        linkedPreviewId: nil,
+                        linkedDayString: nil
+                    )
+                )
+            }
+        } else if let profile = agentDailyViewModel.memoryProfile,
+                  let summary = profile.summary?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !summary.isEmpty {
+            items.append(
+                DailyBulletItem(
+                    title: "Agent memory snapshot",
+                    body: summary,
+                    meta: nil,
+                    linkedPreviewId: nil,
+                    linkedDayString: nil
+                )
+            )
+        } else {
+            let approved = agentDailyViewModel.approvedRules.prefix(5)
+            let rejected = agentDailyViewModel.rejectedRules.prefix(4)
+
+            for rule in approved {
+                items.append(
+                    DailyBulletItem(
+                        title: readableMemoryText(rule.text),
+                        body: "Your agent now leans toward this pattern when responding.",
+                        meta: "Used in \(rule.evidence_count) successful updates",
+                        linkedPreviewId: nil,
+                        linkedDayString: nil
+                    )
+                )
+            }
+            for rule in rejected {
+                items.append(
+                    DailyBulletItem(
+                        title: readableMemoryText(rule.text),
+                        body: "Your agent treats this pattern as less useful now.",
+                        meta: "Marked as less helpful \(rule.evidence_count) times",
+                        linkedPreviewId: nil,
+                        linkedDayString: nil
+                    )
+                )
+            }
+        }
+
+        if items.isEmpty {
+            return [
+                DailyBulletItem(
+                    title: "No memory insights yet",
+                    body: "Review notifications and chat naturally with your agent so memory can grow with real signals.",
+                    meta: nil,
+                    linkedPreviewId: nil,
+                    linkedDayString: nil
+                )
+            ]
+        }
+
+        return items
+    }
+
+    private func appendMemoryGroup(
+        title: String,
+        values: [String],
+        body: String,
+        into items: inout [DailyBulletItem]
+    ) {
+        let normalized = values
+            .map { readableMemoryText($0) }
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard !normalized.isEmpty else { return }
+
+        for value in normalized.prefix(3) {
+            items.append(
+                DailyBulletItem(
+                    title: value,
+                    body: body,
+                    meta: title,
+                    linkedPreviewId: nil,
+                    linkedDayString: nil
+                )
+            )
+        }
+    }
+
+    private func readableMemoryText(_ raw: String) -> String {
+        let stripped = raw
+            .replacingOccurrences(of: #"^\[[^\]]+\]\s*"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return stripped.isEmpty ? raw : stripped
+    }
+
+    private func buildAgentEventPanelItems() -> [AgentEventPanelItem] {
+        guard let activity = agentDailyViewModel.activity else { return [] }
+        let slotDuration = max(1, activity.slot_duration_minutes)
+        var items: [AgentEventPanelItem] = []
+
+        for row in activity.rows {
+            let counts = row.slot_counts
+            guard !counts.isEmpty else { continue }
+
+            var cursor = 0
+            while cursor < counts.count {
+                guard counts[cursor] > 0 else {
+                    cursor += 1
+                    continue
+                }
+
+                let startSlot = cursor
+                var endSlot = cursor
+                var eventCount = 0
+                while endSlot < counts.count, counts[endSlot] > 0 {
+                    eventCount += counts[endSlot]
+                    endSlot += 1
+                }
+
+                let slotRange = startSlot...(max(startSlot, endSlot - 1))
+                let startMinute = activity.start_minute + (startSlot * slotDuration)
+                let endMinute = activity.start_minute + (endSlot * slotDuration)
+                let timeLabel = "\(formatAgentEventTime(startMinute)) - \(formatAgentEventTime(endMinute))"
+                let summary = eventCount == 1 ? "1 event in this window." : "\(eventCount) events in this window."
+                let id = "\(row.key)-\(startSlot)-\(endSlot)"
+
+                items.append(
+                    AgentEventPanelItem(
+                        id: id,
+                        categoryKey: row.key,
+                        categoryLabel: row.label,
+                        timeLabel: timeLabel,
+                        summary: summary,
+                        slotRange: slotRange
+                    )
+                )
+                cursor = endSlot
+            }
+        }
+
+        return items.sorted { lhs, rhs in
+            if lhs.slotRange.lowerBound == rhs.slotRange.lowerBound {
+                return lhs.categoryLabel < rhs.categoryLabel
+            }
+            return lhs.slotRange.lowerBound < rhs.slotRange.lowerBound
+        }
+    }
+
+    private func formatAgentEventTime(_ minute: Int) -> String {
+        let clamped = max(0, minute)
+        let hour24 = (clamped / 60) % 24
+        let minutePart = clamped % 60
+        let period = hour24 >= 12 ? "PM" : "AM"
+        let displayHour = hour24 % 12 == 0 ? 12 : hour24 % 12
+        return String(format: "%d:%02d %@", displayHour, minutePart, period)
+    }
+
+    private func openLinkedTimelineItem(_ item: DailyBulletItem) {
+        guard let previewId = item.linkedPreviewId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !previewId.isEmpty else {
+            return
+        }
+
+        var userInfo: [String: Any] = ["previewId": previewId]
+        if let linkedDayString = item.linkedDayString?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !linkedDayString.isEmpty {
+            userInfo["dayString"] = linkedDayString
+        }
+
+        NotificationCenter.default.post(
+            name: .navigateToAgentPost,
+            object: nil,
+            userInfo: userInfo
+        )
+    }
+
+    private func openMemoryTuningChat() {
+        let topSignals = agentMemoryItems.prefix(3).map(\.title).joined(separator: " | ")
+        let context = topSignals.isEmpty ? "No explicit memory cards yet." : topSignals
+        let prompt = """
+Help me fine-tune your memory based on our latest collaboration.
+Current memory highlights: \(context)
+
+Ask me focused questions to refine: thoughts, tone, preferences, habits, recent context, and tech stack.
+Then summarize the refined memory profile in clear natural language.
+"""
+
+        NotificationCenter.default.post(
+            name: .injectAgentPostToChat,
+            object: nil,
+            userInfo: [
+                "title": "Memory tuning",
+                "content": prompt,
+                "cardType": "memory_tuning"
+            ]
+        )
+    }
+
+    private func reviewEntriesForCurrentMode(onLeadingCard: Bool) -> [AgentReviewEntry]? {
+        guard useAgentDailyDataView else { return nil }
+        guard onLeadingCard else { return nil }
+        return agentPendingReviewEntries + agentRejectedReviewEntries
+    }
+
+    private func approveNotificationReview(_ notificationId: String) {
+        runReviewAction(notificationId: notificationId) {
+            await agentDailyViewModel.review(notificationId: notificationId, action: "approve")
+        }
+    }
+
+    private func rejectNotificationReview(_ notificationId: String, note: String?) {
+        runReviewAction(notificationId: notificationId) {
+            await agentDailyViewModel.review(notificationId: notificationId, action: "reject", note: note)
+        }
+    }
+
+    private func undoNotificationReview(_ notificationId: String) {
+        runReviewAction(notificationId: notificationId) {
+            await agentDailyViewModel.undoReview(notificationId: notificationId)
+        }
+    }
+
+    private func runReviewAction(
+        notificationId: String,
+        operation: @escaping @MainActor () async -> Void
+    ) {
+        guard !reviewActionInFlight.contains(notificationId) else { return }
+        reviewActionInFlight.insert(notificationId)
+
+        Task { @MainActor in
+            defer {
+                reviewActionInFlight.remove(notificationId)
+            }
+            await operation()
+            await agentDailyViewModel.refresh(for: selectedDate, forceRemote: true)
+            applyAgentDataToDraft()
+            applyAgentActivityToWorkflow()
+        }
+    }
+
+    private func indicateRefreshCompleted() {
+        standupCopyResetTask?.cancel()
+        withAnimation(.easeInOut(duration: 0.22)) {
+            standupCopyState = .copied
+        }
+
+        standupCopyResetTask = Task {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard !Task.isCancelled else { return }
             await MainActor.run {
                 withAnimation(.easeInOut(duration: 0.22)) {
                     standupCopyState = .idle
@@ -752,6 +1508,22 @@ private struct DailyWorkflowGrid: View {
     let rows: [DailyWorkflowGridRow]
     let timelineWindow: DailyWorkflowTimelineWindow
     let scale: CGFloat
+    let highlightedCategoryKey: String?
+    let highlightedSlotRange: ClosedRange<Int>?
+
+    init(
+        rows: [DailyWorkflowGridRow],
+        timelineWindow: DailyWorkflowTimelineWindow,
+        scale: CGFloat,
+        highlightedCategoryKey: String? = nil,
+        highlightedSlotRange: ClosedRange<Int>? = nil
+    ) {
+        self.rows = rows
+        self.timelineWindow = timelineWindow
+        self.scale = scale
+        self.highlightedCategoryKey = highlightedCategoryKey
+        self.highlightedSlotRange = highlightedSlotRange
+    }
 
     private var renderRows: [DailyWorkflowGridRow] {
         if rows.isEmpty {
@@ -880,10 +1652,15 @@ private struct DailyWorkflowGrid: View {
             return Color(red: 0.95, green: 0.93, blue: 0.92)
         }
         let occupancy = min(max(row.slotOccupancies[slotIndex], 0), 1)
-        guard occupancy > 0 else { return Color(red: 0.95, green: 0.93, blue: 0.92) }
+        let baseEmpty = Color(red: 0.95, green: 0.93, blue: 0.92)
+        guard occupancy > 0 else {
+            return baseEmpty
+        }
 
-        // Partial occupancy stays dimmer; full occupancy reaches full intensity.
-        let alpha = 0.3 + (occupancy * 0.7)
+        let isHighlightedCategory = highlightedCategoryKey == nil || highlightedCategoryKey == row.id
+        let isHighlightedSlot = highlightedSlotRange == nil || highlightedSlotRange?.contains(slotIndex) == true
+        let isHighlighted = isHighlightedCategory && isHighlightedSlot
+        let alpha = isHighlighted ? (0.32 + (occupancy * 0.68)) : (0.12 + (occupancy * 0.16))
         return Color(hex: row.colorHex).opacity(alpha)
     }
 
@@ -951,6 +1728,23 @@ private struct DailyModeToggle: View {
 
     let activeMode: ActiveMode
     let scale: CGFloat
+    let leadingText: String
+    let trailingText: String
+    let onSelect: ((ActiveMode) -> Void)?
+
+    init(
+        activeMode: ActiveMode,
+        scale: CGFloat,
+        leadingText: String = "Highlights",
+        trailingText: String = "Details",
+        onSelect: ((ActiveMode) -> Void)? = nil
+    ) {
+        self.activeMode = activeMode
+        self.scale = scale
+        self.leadingText = leadingText
+        self.trailingText = trailingText
+        self.onSelect = onSelect
+    }
 
     private var cornerRadius: CGFloat { 8 * scale }
     private var borderWidth: CGFloat { max(0.7, 1 * scale) }
@@ -959,14 +1753,16 @@ private struct DailyModeToggle: View {
     var body: some View {
         HStack(spacing: 0) {
             segment(
-                text: "Highlights",
+                text: leadingText,
                 isActive: activeMode == .highlights,
-                isLeading: true
+                isLeading: true,
+                mode: .highlights
             )
             segment(
-                text: "Details",
+                text: trailingText,
                 isActive: activeMode == .details,
-                isLeading: false
+                isLeading: false,
+                mode: .details
             )
         }
         .overlay(
@@ -976,10 +1772,10 @@ private struct DailyModeToggle: View {
     }
 
     @ViewBuilder
-    private func segment(text: String, isActive: Bool, isLeading: Bool) -> some View {
+    private func segment(text: String, isActive: Bool, isLeading: Bool, mode: ActiveMode) -> some View {
         let fill = isActive ? Color(hex: "FFA767") : Color(hex: "FFFAF7").opacity(0.6)
 
-        Text(text)
+        let segmentContent = Text(text)
             .font(.custom("Nunito-Regular", size: 14 * scale))
             .lineLimit(1)
             .foregroundStyle(isActive ? Color.white : Color(hex: "837870"))
@@ -1005,6 +1801,20 @@ private struct DailyModeToggle: View {
                         .frame(width: borderWidth)
                 }
             }
+
+        if let onSelect {
+            Button {
+                guard !isActive else { return }
+                onSelect(mode)
+            } label: {
+                segmentContent
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .pointingHandCursorOnHover(reassertOnPressEnd: true)
+        } else {
+            segmentContent
+        }
     }
 }
 
@@ -1020,6 +1830,11 @@ private struct DailyBulletCard: View {
         case tasks
     }
 
+    enum HeaderActionStyle {
+        case subtle
+        case gradientPulse
+    }
+
     let style: Style
     let seamMode: SeamMode
     @Binding var title: String
@@ -1029,6 +1844,20 @@ private struct DailyBulletCard: View {
     @Binding var blockersTitle: String
     @Binding var blockersBody: String
     let scale: CGFloat
+    let isReadOnly: Bool
+    let reviewEntries: [AgentReviewEntry]?
+    let reviewActionInFlight: Set<String>
+    let reviewFeedbackMessage: String?
+    let reviewErrorMessage: String?
+    let onApproveReview: ((String) -> Void)?
+    let onRejectReview: ((String, String?) -> Void)?
+    let onUndoReview: ((String) -> Void)?
+    let onOpenLinkedItem: ((DailyBulletItem) -> Void)?
+    let showsBlockersSection: Bool
+    let headerAccessory: AnyView?
+    let headerActionTitle: String?
+    let headerActionStyle: HeaderActionStyle
+    let onHeaderAction: (() -> Void)?
     @State private var draggedItemID: UUID? = nil
 
     private var cardShape: UnevenRoundedRectangle {
@@ -1065,65 +1894,137 @@ private struct DailyBulletCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 18 * scale) {
-                TextField("Section title", text: $title)
-                    .font(.custom("InstrumentSerif-Regular", size: 24 * scale))
-                    .foregroundStyle(Color(hex: "B46531"))
-                    .textFieldStyle(.plain)
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                if isReadOnly {
+                    HStack(alignment: .center, spacing: 10 * scale) {
+                        Text(title)
+                            .font(.custom("InstrumentSerif-Regular", size: 24 * scale))
+                            .foregroundStyle(Color(hex: "B46531"))
+                            .frame(maxWidth: .infinity, alignment: .leading)
 
-                if showItems {
-                    VStack(alignment: .leading, spacing: 14 * scale) {
-                        ForEach($items) { $item in
-                            let itemID = item.id
-                            HStack(alignment: .top, spacing: 6 * scale) {
-                                DailyDragHandleIcon(scale: scale)
-                                    .padding(.top, 5 * scale)
-                                    .onDrag {
-                                        draggedItemID = itemID
-                                        return NSItemProvider(object: itemID.uuidString as NSString)
-                                    }
-                                    .pointingHandCursorOnHover(reassertOnPressEnd: true)
+                        if let headerAccessory {
+                            headerAccessory
+                        }
 
-                                HStack(alignment: .firstTextBaseline, spacing: 4 * scale) {
-                                    TextField("Item title", text: $item.title)
-                                        .font(.custom("Nunito-Bold", size: 14 * scale))
-                                        .foregroundStyle(Color.black)
-                                        .textFieldStyle(.plain)
-                                        .lineLimit(1)
-
-                                    Text("—")
-                                        .font(.custom("Nunito-Regular", size: 14 * scale))
-                                        .foregroundStyle(Color.black)
-
-                                    TextField("Details", text: $item.body, axis: .vertical)
-                                        .font(.custom("Nunito-Regular", size: 14 * scale))
-                                        .foregroundStyle(Color.black)
-                                        .textFieldStyle(.plain)
-                                        .lineLimit(1...6)
-                                }
-                                .multilineTextAlignment(.leading)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                        if let headerActionTitle,
+                           let onHeaderAction {
+                            Button {
+                                onHeaderAction()
+                            } label: {
+                                headerActionLabel(title: headerActionTitle)
                             }
-                            .onDrop(
-                                of: ["public.text"],
-                                delegate: DailyItemDropDelegate(
-                                    targetItemID: itemID,
-                                    items: $items,
-                                    draggedItemID: $draggedItemID
-                                )
-                            )
+                            .buttonStyle(.plain)
+                            .pointingHandCursorOnHover(reassertOnPressEnd: true)
                         }
                     }
-                    .onDrop(
-                        of: ["public.text"],
-                        delegate: DailyItemDropToEndDelegate(
-                            items: $items,
-                            draggedItemID: $draggedItemID
+                } else {
+                    TextField("Section title", text: $title)
+                        .font(.custom("InstrumentSerif-Regular", size: 24 * scale))
+                        .foregroundStyle(Color(hex: "B46531"))
+                        .textFieldStyle(.plain)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                if showItems {
+                    if isReadOnly {
+                        VStack(alignment: .leading, spacing: 10 * scale) {
+                            if let reviewEntries {
+                                if let reviewFeedbackMessage,
+                                   !reviewFeedbackMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    Text(reviewFeedbackMessage)
+                                        .font(.custom("Nunito-SemiBold", size: 12 * scale))
+                                        .foregroundStyle(Color(hex: "2D8A4F"))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+
+                                if let reviewErrorMessage,
+                                   !reviewErrorMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    Text(reviewErrorMessage)
+                                        .font(.custom("Nunito-SemiBold", size: 12 * scale))
+                                        .foregroundStyle(Color(hex: "B64C38"))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+
+                                if reviewEntries.isEmpty {
+                                    Text("No notifications")
+                                        .font(.custom("Nunito-Regular", size: 13 * scale))
+                                        .foregroundStyle(Color(hex: "8E847C"))
+                                } else {
+                                    ForEach(reviewEntries) { entry in
+                                        DailyReviewEntryView(
+                                            entry: entry,
+                                            scale: scale,
+                                            isBusy: reviewActionInFlight.contains(entry.id),
+                                            onApprove: onApproveReview,
+                                            onReject: onRejectReview,
+                                            onUndo: onUndoReview
+                                        )
+                                    }
+                                }
+                            } else if items.isEmpty {
+                                Text("No items available.")
+                                    .font(.custom("Nunito-Regular", size: 13 * scale))
+                                    .foregroundStyle(Color(hex: "8E847C"))
+                            } else {
+                                ForEach(items) { item in
+                                    readOnlyItemCard(item: item)
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        VStack(alignment: .leading, spacing: 14 * scale) {
+                            ForEach($items) { $item in
+                                let itemID = item.id
+                                HStack(alignment: .top, spacing: 6 * scale) {
+                                    DailyDragHandleIcon(scale: scale)
+                                        .padding(.top, 5 * scale)
+                                        .onDrag {
+                                            draggedItemID = itemID
+                                            return NSItemProvider(object: itemID.uuidString as NSString)
+                                        }
+                                        .pointingHandCursorOnHover(reassertOnPressEnd: true)
+
+                                    HStack(alignment: .firstTextBaseline, spacing: 4 * scale) {
+                                        TextField("Item title", text: $item.title)
+                                            .font(.custom("Nunito-Bold", size: 14 * scale))
+                                            .foregroundStyle(Color.black)
+                                            .textFieldStyle(.plain)
+                                            .lineLimit(1)
+
+                                        Text("—")
+                                            .font(.custom("Nunito-Regular", size: 14 * scale))
+                                            .foregroundStyle(Color.black)
+
+                                        TextField("Details", text: $item.body, axis: .vertical)
+                                            .font(.custom("Nunito-Regular", size: 14 * scale))
+                                            .foregroundStyle(Color.black)
+                                            .textFieldStyle(.plain)
+                                            .lineLimit(1...6)
+                                    }
+                                    .multilineTextAlignment(.leading)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .onDrop(
+                                    of: ["public.text"],
+                                    delegate: DailyItemDropDelegate(
+                                        targetItemID: itemID,
+                                        items: $items,
+                                        draggedItemID: $draggedItemID
+                                    )
+                                )
+                            }
+                        }
+                        .onDrop(
+                            of: ["public.text"],
+                            delegate: DailyItemDropToEndDelegate(
+                                items: $items,
+                                draggedItemID: $draggedItemID
+                            )
                         )
-                    )
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
             }
             .padding(.leading, 26 * scale)
@@ -1132,23 +2033,30 @@ private struct DailyBulletCard: View {
 
             Spacer(minLength: 0)
 
-            DailyAddTaskRow(scale: scale, text: $addTaskLabel) { submitted in
-                let normalizedTitle = submitted.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !normalizedTitle.isEmpty else { return }
-                items.append(DailyBulletItem(title: normalizedTitle, body: ""))
+            if !isReadOnly {
+                DailyAddTaskRow(scale: scale, text: $addTaskLabel) { submitted in
+                    let normalizedTitle = submitted.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !normalizedTitle.isEmpty else { return }
+                    items.append(DailyBulletItem(title: normalizedTitle, body: ""))
+                }
+                    .padding(.leading, style == .highlights ? 16 * scale : 26 * scale)
+                    .padding(.bottom, style == .tasks ? 24 * scale : 20 * scale)
             }
-                .padding(.leading, style == .highlights ? 16 * scale : 26 * scale)
-                .padding(.bottom, style == .tasks ? 24 * scale : 20 * scale)
 
-            if style == .tasks {
+            if style == .tasks && showsBlockersSection {
                 DailyBlockersSection(
                     scale: scale,
                     title: $blockersTitle,
-                    prompt: $blockersBody
+                    prompt: $blockersBody,
+                    isReadOnly: isReadOnly
                 )
             }
         }
-        .frame(maxWidth: .infinity, minHeight: max(180, 394 * scale), alignment: .topLeading)
+        .frame(
+            maxWidth: .infinity,
+            minHeight: isReadOnly ? max(180, 340 * scale) : max(180, 394 * scale),
+            alignment: .topLeading
+        )
         .background(
             cardShape
                 .fill(
@@ -1169,6 +2077,448 @@ private struct DailyBulletCard: View {
                 .stroke(Color(hex: "EBE6E3"), lineWidth: max(0.7, 1 * scale))
         )
         .shadow(color: Color.black.opacity(0.1), radius: 12 * scale, x: 0, y: 0)
+    }
+
+    @ViewBuilder
+    private func headerActionLabel(title: String) -> some View {
+        switch headerActionStyle {
+        case .subtle:
+            Text(title)
+                .font(.custom("Nunito-SemiBold", size: 12 * scale))
+                .foregroundStyle(Color(hex: "F96E00"))
+                .padding(.horizontal, 10 * scale)
+                .padding(.vertical, 6 * scale)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(Color(hex: "FFF6EE"))
+                )
+                .overlay(
+                    Capsule(style: .continuous)
+                        .stroke(Color(hex: "F3DCC7"), lineWidth: max(0.7, 1 * scale))
+                )
+        case .gradientPulse:
+            MemoryTuningActionCapsule(title: title, scale: scale)
+        }
+    }
+
+    @ViewBuilder
+    private func readOnlyItemCard(item: DailyBulletItem) -> some View {
+        let content = VStack(alignment: .leading, spacing: 6 * scale) {
+            Text(item.title.trimmingCharacters(in: .whitespacesAndNewlines))
+                .font(.custom("Nunito-Bold", size: 14 * scale))
+                .foregroundStyle(Color(hex: "1F1B18"))
+
+            let bodyText = item.body.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !bodyText.isEmpty {
+                Text(bodyText)
+                    .font(.custom("Nunito-Regular", size: 14 * scale))
+                    .foregroundStyle(Color(hex: "2B2521"))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if let meta = item.meta?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !meta.isEmpty {
+                Text(meta)
+                    .font(.custom("Nunito-Regular", size: 12 * scale))
+                    .foregroundStyle(Color(hex: "8B7E73"))
+            }
+
+            if item.hasTimelineLink {
+                HStack(spacing: 5 * scale) {
+                    Image(systemName: "arrow.right.circle")
+                        .font(.system(size: 11 * scale, weight: .semibold))
+                    Text("Open in timeline")
+                        .font(.custom("Nunito-SemiBold", size: 12 * scale))
+                }
+                .foregroundStyle(Color(hex: "B46531"))
+                .padding(.top, 2 * scale)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12 * scale)
+        .padding(.vertical, 10 * scale)
+        .background(
+            RoundedRectangle(cornerRadius: 8 * scale, style: .continuous)
+                .fill(Color(hex: "FCFAF8"))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8 * scale, style: .continuous)
+                .stroke(Color(hex: "ECE4DD"), lineWidth: max(0.6, 0.8 * scale))
+        )
+
+        if item.hasTimelineLink, let onOpenLinkedItem {
+            Button {
+                onOpenLinkedItem(item)
+            } label: {
+                content
+            }
+            .buttonStyle(.plain)
+            .pointingHandCursorOnHover(reassertOnPressEnd: true)
+        } else {
+            content
+        }
+    }
+}
+
+private struct DailyReviewEntryView: View {
+    let entry: AgentReviewEntry
+    let scale: CGFloat
+    let isBusy: Bool
+    let onApprove: ((String) -> Void)?
+    let onReject: ((String, String?) -> Void)?
+    let onUndo: ((String) -> Void)?
+
+    @State private var note: String = ""
+    @State private var isRejectEditorPresented: Bool = false
+
+    private var prefersScrollableBody: Bool {
+        entry.body.count > 230
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8 * scale) {
+            Text(entry.title)
+                .font(.custom("Nunito-Bold", size: 14 * scale))
+                .foregroundStyle(Color(hex: "1F1B18"))
+
+            Group {
+                if prefersScrollableBody {
+                    ScrollView(.vertical, showsIndicators: true) {
+                        Text(entry.body)
+                            .font(.custom("Nunito-Regular", size: 14 * scale))
+                            .foregroundStyle(Color(hex: "2B2521"))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.trailing, 4 * scale)
+                    }
+                    .frame(maxHeight: 130 * scale)
+                } else {
+                    Text(entry.body)
+                        .font(.custom("Nunito-Regular", size: 14 * scale))
+                        .foregroundStyle(Color(hex: "2B2521"))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            if entry.isRejected {
+                HStack(spacing: 10 * scale) {
+                    Text("Needs revision")
+                        .font(.custom("Nunito-SemiBold", size: 12 * scale))
+                        .foregroundStyle(Color(hex: "B64C38"))
+                        .padding(.horizontal, 8 * scale)
+                        .padding(.vertical, 4 * scale)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Color(hex: "FFF3EF"))
+                        )
+                        .overlay(
+                            Capsule(style: .continuous)
+                                .stroke(Color(hex: "F0C8BC"), lineWidth: max(0.6, 0.8 * scale))
+                        )
+
+                    Button {
+                        guard !isBusy else { return }
+                        onUndo?(entry.id)
+                    } label: {
+                        DailyReviewActionButtonLabel(
+                            text: "Undo",
+                            scale: scale,
+                            style: .neutral
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isBusy)
+                    .opacity(isBusy ? 0.45 : 1)
+                    .pointingHandCursorOnHover(enabled: !isBusy, reassertOnPressEnd: true)
+                }
+            } else {
+                HStack(spacing: 10 * scale) {
+                    Button {
+                        guard !isBusy else { return }
+                        onApprove?(entry.id)
+                    } label: {
+                        DailyReviewActionButtonLabel(
+                            text: "Approve",
+                            scale: scale,
+                            style: .approve
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isBusy)
+                    .opacity(isBusy ? 0.45 : 1)
+                    .pointingHandCursorOnHover(enabled: !isBusy, reassertOnPressEnd: true)
+
+                    Button {
+                        guard !isBusy else { return }
+                        withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
+                            isRejectEditorPresented.toggle()
+                        }
+                    } label: {
+                        DailyReviewActionButtonLabel(
+                            text: "Reject",
+                            scale: scale,
+                            style: .reject
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isBusy)
+                    .opacity(isBusy ? 0.45 : 1)
+                    .pointingHandCursorOnHover(enabled: !isBusy, reassertOnPressEnd: true)
+
+                    if isBusy {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+
+                if isRejectEditorPresented {
+                    VStack(alignment: .leading, spacing: 8 * scale) {
+                        TextField("Optional reject note", text: $note)
+                            .textFieldStyle(.plain)
+                            .font(.custom("Nunito-Regular", size: 13 * scale))
+                            .foregroundStyle(Color(hex: "6F655D"))
+                            .padding(.horizontal, 10 * scale)
+                            .padding(.vertical, 7 * scale)
+                            .background(
+                                RoundedRectangle(cornerRadius: 7 * scale, style: .continuous)
+                                    .fill(Color.white)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7 * scale, style: .continuous)
+                                    .stroke(Color(hex: "E5DBD3"), lineWidth: max(0.6, 0.8 * scale))
+                            )
+
+                        HStack(spacing: 10 * scale) {
+                            Button {
+                                guard !isBusy else { return }
+                                let trimmed = note.trimmingCharacters(in: .whitespacesAndNewlines)
+                                onReject?(entry.id, trimmed.isEmpty ? nil : trimmed)
+                                withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
+                                    isRejectEditorPresented = false
+                                    note = ""
+                                }
+                            } label: {
+                                DailyReviewActionButtonLabel(
+                                    text: "Confirm reject",
+                                    scale: scale,
+                                    style: .reject
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isBusy)
+                            .opacity(isBusy ? 0.45 : 1)
+                            .pointingHandCursorOnHover(enabled: !isBusy, reassertOnPressEnd: true)
+
+                            Button {
+                                withAnimation(.spring(response: 0.28, dampingFraction: 0.88)) {
+                                    isRejectEditorPresented = false
+                                    note = ""
+                                }
+                            } label: {
+                                DailyReviewActionButtonLabel(
+                                    text: "Cancel",
+                                    scale: scale,
+                                    style: .neutral
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isBusy)
+                            .opacity(isBusy ? 0.45 : 1)
+                            .pointingHandCursorOnHover(enabled: !isBusy, reassertOnPressEnd: true)
+                        }
+                    }
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12 * scale)
+        .padding(.vertical, 10 * scale)
+        .background(
+            RoundedRectangle(cornerRadius: 8 * scale, style: .continuous)
+                .fill(Color(hex: "FCFAF8"))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8 * scale, style: .continuous)
+                .stroke(Color(hex: "ECE4DD"), lineWidth: max(0.6, 0.8 * scale))
+        )
+    }
+}
+
+private struct DailyReviewActionButtonLabel: View {
+    enum Style {
+        case approve
+        case reject
+        case neutral
+    }
+
+    let text: String
+    let scale: CGFloat
+    let style: Style
+
+    var body: some View {
+        Text(text)
+            .font(.custom("Nunito-SemiBold", size: 12 * scale))
+            .foregroundStyle(foregroundColor)
+            .padding(.horizontal, 10 * scale)
+            .padding(.vertical, 6 * scale)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(backgroundColor)
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(borderColor, lineWidth: max(0.6, 0.8 * scale))
+            )
+    }
+
+    private var foregroundColor: Color {
+        switch style {
+        case .approve:
+            return Color(hex: "1A8A55")
+        case .reject:
+            return Color(hex: "B64C38")
+        case .neutral:
+            return Color(hex: "7C7068")
+        }
+    }
+
+    private var backgroundColor: Color {
+        switch style {
+        case .approve:
+            return Color(hex: "F0FBF5")
+        case .reject:
+            return Color(hex: "FFF3EF")
+        case .neutral:
+            return Color(hex: "FAF6F2")
+        }
+    }
+
+    private var borderColor: Color {
+        switch style {
+        case .approve:
+            return Color(hex: "C5EAD4")
+        case .reject:
+            return Color(hex: "F0C8BC")
+        case .neutral:
+            return Color(hex: "E8D9CD")
+        }
+    }
+}
+
+private struct MemoryTuningActionCapsule: View {
+    let title: String
+    let scale: CGFloat
+
+    var body: some View {
+        Text(title)
+            .font(.custom("Nunito-SemiBold", size: 12 * scale))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12 * scale)
+            .padding(.vertical, 7 * scale)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [Color(hex: "FF996E"), Color(hex: "BFA6FF")],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .stroke(Color(hex: "F6D5BE"), lineWidth: max(0.8, 1 * scale))
+            )
+    }
+}
+
+private struct AgentEventsPanel: View {
+    let dateTitle: String
+    let events: [AgentEventPanelItem]
+    let onSelect: (AgentActivityHighlight) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Agent events")
+                        .font(.custom("InstrumentSerif-Regular", size: 24))
+                        .foregroundStyle(Color(hex: "B46531"))
+                    Text(dateTitle)
+                        .font(.custom("Nunito-Regular", size: 12))
+                        .foregroundStyle(Color(hex: "8D8073"))
+                }
+                Spacer()
+                Button("Close") { dismiss() }
+                    .buttonStyle(.plain)
+                    .font(.custom("Nunito-SemiBold", size: 12))
+                    .foregroundStyle(Color(hex: "9A6A45"))
+                    .pointingHandCursorOnHover(reassertOnPressEnd: true)
+            }
+
+            if events.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("No event slices available yet")
+                        .font(.custom("Nunito-SemiBold", size: 14))
+                        .foregroundStyle(Color(hex: "64584F"))
+                    Text("Sync with Agent to pull activity signals, then select an event slice to highlight it on the timeline.")
+                        .font(.custom("Nunito-Regular", size: 13))
+                        .foregroundStyle(Color(hex: "8B7E73"))
+                }
+                .padding(.top, 8)
+            } else {
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(events) { event in
+                            Button {
+                                onSelect(
+                                    AgentActivityHighlight(
+                                        categoryKey: event.categoryKey,
+                                        slotRange: event.slotRange
+                                    )
+                                )
+                            } label: {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack {
+                                        Text(event.categoryLabel)
+                                            .font(.custom("Nunito-SemiBold", size: 14))
+                                            .foregroundStyle(Color(hex: "2D261F"))
+                                        Spacer(minLength: 8)
+                                        Text(event.timeLabel)
+                                            .font(.custom("Nunito-SemiBold", size: 12))
+                                            .foregroundStyle(Color(hex: "A07148"))
+                                    }
+                                    Text(event.summary)
+                                        .font(.custom("Nunito-Regular", size: 13))
+                                        .foregroundStyle(Color(hex: "6F655D"))
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 10)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(Color(hex: "FFF8F2"))
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .stroke(Color(hex: "F2DEC9"), lineWidth: 1)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .pointingHandCursorOnHover(reassertOnPressEnd: true)
+                        }
+                    }
+                    .padding(.trailing, 2)
+                }
+                .frame(maxHeight: 360)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+        .frame(minWidth: 440, idealWidth: 520)
     }
 }
 
@@ -1233,25 +2583,38 @@ private struct DailyBlockersSection: View {
     let scale: CGFloat
     @Binding var title: String
     @Binding var prompt: String
+    let isReadOnly: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8 * scale) {
-            TextField("Blockers", text: $title)
-                .font(.custom("Nunito-Medium", size: 14 * scale))
-                .foregroundStyle(Color(hex: "BD9479"))
-                .textFieldStyle(.plain)
-
-            HStack(alignment: .top, spacing: 6 * scale) {
-                DailyDragHandleIcon(scale: scale)
-                    .padding(.top, 1 * scale)
-
-                TextField("Fill in any blockers you may have", text: $prompt, axis: .vertical)
+            if isReadOnly {
+                Text(title)
+                    .font(.custom("Nunito-Medium", size: 14 * scale))
+                    .foregroundStyle(Color(hex: "BD9479"))
+                Text(prompt)
                     .font(.custom("Nunito-Regular", size: 14 * scale))
-                    .foregroundStyle(Color(hex: "929292"))
-                    .textFieldStyle(.plain)
-                    .lineLimit(1...4)
-                    .multilineTextAlignment(.leading)
+                    .foregroundStyle(Color(hex: "6F655D"))
+                    .lineSpacing(3 * scale)
+                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                TextField("Blockers", text: $title)
+                    .font(.custom("Nunito-Medium", size: 14 * scale))
+                    .foregroundStyle(Color(hex: "BD9479"))
+                    .textFieldStyle(.plain)
+
+                HStack(alignment: .top, spacing: 6 * scale) {
+                    DailyDragHandleIcon(scale: scale)
+                        .padding(.top, 1 * scale)
+
+                    TextField("Fill in any blockers you may have", text: $prompt, axis: .vertical)
+                        .font(.custom("Nunito-Regular", size: 14 * scale))
+                        .foregroundStyle(Color(hex: "929292"))
+                        .textFieldStyle(.plain)
+                        .lineLimit(1...4)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
         .padding(.leading, 26 * scale)
@@ -1330,6 +2693,73 @@ private struct DailyBulletItem: Identifiable, Codable, Equatable, Sendable {
     var id: UUID = UUID()
     var title: String
     var body: String
+    var meta: String?
+    var linkedPreviewId: String?
+    var linkedDayString: String?
+
+    var hasTimelineLink: Bool {
+        guard let linkedPreviewId = linkedPreviewId?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return false
+        }
+        return !linkedPreviewId.isEmpty
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case body
+        case meta
+        case linkedPreviewId
+        case linkedDayString
+    }
+
+    init(
+        id: UUID = UUID(),
+        title: String,
+        body: String,
+        meta: String? = nil,
+        linkedPreviewId: String? = nil,
+        linkedDayString: String? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.body = body
+        self.meta = meta
+        self.linkedPreviewId = linkedPreviewId
+        self.linkedDayString = linkedDayString
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        title = try container.decode(String.self, forKey: .title)
+        body = try container.decode(String.self, forKey: .body)
+        meta = try container.decodeIfPresent(String.self, forKey: .meta)
+        linkedPreviewId = try container.decodeIfPresent(String.self, forKey: .linkedPreviewId)
+        linkedDayString = try container.decodeIfPresent(String.self, forKey: .linkedDayString)
+    }
+}
+
+private struct AgentReviewEntry: Identifiable, Sendable {
+    let id: String
+    let title: String
+    let body: String
+    let isRejected: Bool
+    let postId: String?
+}
+
+private struct AgentActivityHighlight {
+    let categoryKey: String
+    let slotRange: ClosedRange<Int>
+}
+
+private struct AgentEventPanelItem: Identifiable {
+    let id: String
+    let categoryKey: String
+    let categoryLabel: String
+    let timeLabel: String
+    let summary: String
+    let slotRange: ClosedRange<Int>
 }
 
 private struct DailyWorkflowGridRow: Identifiable, Sendable {

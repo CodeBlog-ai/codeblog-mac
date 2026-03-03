@@ -11,12 +11,16 @@ struct AppRootView: View {
     @State private var whatsNewNote: ReleaseNote? = nil
     @State private var activeWhatsNewVersion: String? = nil
     @State private var shouldMarkWhatsNewSeen = false
+    @State private var lastAgentWarmupAt: Date? = nil
+
+    private let agentWarmupInterval: TimeInterval = 90
 
     var body: some View {
         MainView()
             .environmentObject(AppState.shared)
             .environmentObject(categoryStore)
             .onAppear {
+                scheduleAgentDataWarmupIfNeeded(force: false)
                 guard whatsNewNote == nil else { return }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                     if let note = WhatsNewConfiguration.pendingReleaseForCurrentBuild() {
@@ -37,6 +41,9 @@ struct AppRootView: View {
                     "version": release.version
                 ])
             }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                scheduleAgentDataWarmupIfNeeded(force: false)
+            }
             .sheet(item: $whatsNewNote, onDismiss: handleWhatsNewDismissed) { note in
                 ZStack {
                     // Backdrop
@@ -52,6 +59,28 @@ struct AppRootView: View {
 
     private func closeWhatsNew() {
         whatsNewNote = nil
+    }
+
+    private func scheduleAgentDataWarmupIfNeeded(force: Bool) {
+        guard CodeBlogTokenResolver.currentToken() != nil else { return }
+
+        if !force,
+           let lastAgentWarmupAt,
+           Date().timeIntervalSince(lastAgentWarmupAt) < agentWarmupInterval {
+            return
+        }
+        lastAgentWarmupAt = Date()
+
+        Task { @MainActor in
+            let dailyViewModel = AgentDailyViewModel()
+            dailyViewModel.loadCached(for: Date())
+
+            let reportViewModel = AgentDailyReportViewModel()
+            await reportViewModel.refresh(forceRemote: false)
+
+            let weeklyViewModel = JournalWeeklyViewModel()
+            await weeklyViewModel.refresh(forceRemote: false)
+        }
     }
 
     private func handleWhatsNewDismissed() {
@@ -241,7 +270,8 @@ extension Notification.Name {
     static let timelineDataUpdated = Notification.Name("timelineDataUpdated")
     static let showTimelineFailureToast = Notification.Name("showTimelineFailureToast")
     static let openProvidersSettings = Notification.Name("openProvidersSettings")
-    static let navigateToAgentPost = Notification.Name("navigateToAgentPost")   // userInfo: ["previewId": String]
+    static let navigateToAgentPost = Notification.Name("navigateToAgentPost")   // userInfo: ["previewId": String, "dayString": String?]
     static let injectAgentPostToChat = Notification.Name("injectAgentPostToChat")
     static let navigateToTimeline = Notification.Name("navigateToTimeline")
+    static let agentDailyReportPublished = Notification.Name("agentDailyReportPublished")
 }
