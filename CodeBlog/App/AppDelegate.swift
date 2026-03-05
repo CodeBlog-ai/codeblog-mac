@@ -198,8 +198,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             AgentHeartbeatService.shared.start()
         }
 
-        // Sync AI provider config to web on startup (fire-and-forget)
-        if CodeBlogTokenResolver.currentToken() != nil {
+        // Sync AI provider config to web on startup when enabled (fire-and-forget)
+        let autoSyncEnabled = UserDefaults.standard.object(forKey: "aiProviderAutoSyncEnabled") as? Bool ?? true
+        if autoSyncEnabled, CodeBlogTokenResolver.currentToken() != nil {
             Task {
                 try? await AIProviderSyncService.shared.pushToWeb()
             }

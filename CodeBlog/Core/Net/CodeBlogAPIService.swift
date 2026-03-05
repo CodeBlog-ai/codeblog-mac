@@ -29,6 +29,22 @@ final class CodeBlogAPIService {
         let created_at: String
     }
 
+    struct AgentDetail: Decodable, Identifiable {
+        let id: String
+        let name: String
+        let description: String?
+        let avatar: String?
+        let activated: Bool
+        let autonomousEnabled: Bool
+        let autonomousRules: String?
+        let autonomousRunEveryMinutes: Int?
+        let autonomousDailyTokenLimit: Int?
+        let autonomousDailyTokensUsed: Int?
+        let autonomousPausedReason: String?
+        let createdAt: String
+        let updatedAt: String
+    }
+
     struct AgentCreateResult: Codable {
         let id: String
         let name: String
@@ -304,6 +320,13 @@ final class CodeBlogAPIService {
         return response.agents
     }
 
+    /// GET /api/v1/agents/{id}
+    func getAgentDetail(apiKey: String, agentId: String) async throws -> AgentDetail {
+        let request = authorizedRequest(path: "/api/v1/agents/\(agentId)", apiKey: apiKey)
+        let response: AgentDetailResponse = try await send(request)
+        return response.agent
+    }
+
     /// POST /api/v1/agents/create
     func createAgent(apiKey: String, name: String, sourceType: String) async throws -> AgentCreateResult {
         let payload = AgentCreatePayload(name: name, source_type: sourceType)
@@ -329,6 +352,32 @@ final class CodeBlogAPIService {
         let request = authorizedRequest(path: "/api/v1/agents/\(agentId)/persona", apiKey: apiKey, method: "PATCH", body: body)
         // We don't need the response, just verify it succeeds
         let _: PersonaPatchResponse = try await send(request)
+    }
+
+    /// PATCH /api/v1/agents/{id} (autonomous settings)
+    func updateAgentAutonomous(
+        apiKey: String,
+        agentId: String,
+        autonomousEnabled: Bool,
+        autonomousRules: String,
+        autonomousRunEveryMinutes: Int,
+        autonomousDailyTokenLimit: Int
+    ) async throws -> AgentDetail {
+        let payload = AgentAutonomousPatchPayload(
+            autonomousEnabled: autonomousEnabled,
+            autonomousRules: autonomousRules,
+            autonomousRunEveryMinutes: autonomousRunEveryMinutes,
+            autonomousDailyTokenLimit: autonomousDailyTokenLimit
+        )
+        let body = try JSONEncoder().encode(payload)
+        let request = authorizedRequest(
+            path: "/api/v1/agents/\(agentId)",
+            apiKey: apiKey,
+            method: "PATCH",
+            body: body
+        )
+        let response: AgentDetailResponse = try await send(request)
+        return response.agent
     }
 
     /// GET /api/v1/ai-credit/balance
@@ -577,6 +626,10 @@ private struct AgentListResponse: Decodable {
     let agents: [CodeBlogAPIService.AgentInfo]
 }
 
+private struct AgentDetailResponse: Decodable {
+    let agent: CodeBlogAPIService.AgentDetail
+}
+
 private struct AgentCreatePayload: Encodable {
     let name: String
     let source_type: String
@@ -605,6 +658,13 @@ private struct PersonaPatchPayload: Encodable {
 
 private struct PersonaPatchResponse: Decodable {
     let agent_id: String
+}
+
+private struct AgentAutonomousPatchPayload: Encodable {
+    let autonomousEnabled: Bool
+    let autonomousRules: String
+    let autonomousRunEveryMinutes: Int
+    let autonomousDailyTokenLimit: Int
 }
 
 private struct DailyReportListResponse: Decodable {

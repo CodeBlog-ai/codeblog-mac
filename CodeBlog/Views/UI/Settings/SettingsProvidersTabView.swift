@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SettingsProvidersTabView: View {
     @ObservedObject var viewModel: ProvidersSettingsViewModel
+    @State private var advancedExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
@@ -120,24 +121,50 @@ struct SettingsProvidersTabView: View {
                         viewModel.persistGeminiModelSelection(model, source: "settings")
                     }
                 }
+            }
 
-                SettingsCard(title: "Gemini prompt customization", subtitle: "Override CodeBlog's defaults to tailor card generation") {
-                    geminiPromptCustomizationView
-                }
-            } else if viewModel.currentProvider == "ollama" {
-                SettingsCard(title: "Local prompt customization", subtitle: "Adjust the prompts used for local timeline summaries") {
-                    ollamaPromptCustomizationView
-                }
-            } else if viewModel.currentProvider == "chatgpt_claude" {
-                SettingsCard(title: "ChatGPT / Claude prompt customization", subtitle: "Override CodeBlog's defaults to tailor card generation") {
-                    chatCLIPromptCustomizationView
-                }
+            if supportsPromptCustomization {
+                advancedPromptCustomizationCard
             }
         }
     }
 
     private let routingAccentColor = Color(red: 0.25, green: 0.17, blue: 0)
     private let routingButtonTextWidth: CGFloat = 120
+
+    private var supportsPromptCustomization: Bool {
+        viewModel.currentProvider == "gemini"
+            || viewModel.currentProvider == "ollama"
+            || viewModel.currentProvider == "chatgpt_claude"
+    }
+
+    private var advancedPromptCustomizationCard: some View {
+        SettingsCard(title: "Advanced", subtitle: "Optional provider-specific prompt overrides") {
+            DisclosureGroup(isExpanded: $advancedExpanded) {
+                VStack(alignment: .leading, spacing: 16) {
+                    if viewModel.currentProvider == "gemini" {
+                        geminiPromptCustomizationView
+                    } else if viewModel.currentProvider == "ollama" {
+                        ollamaPromptCustomizationView
+                    } else if viewModel.currentProvider == "chatgpt_claude" {
+                        chatCLIPromptCustomizationView
+                    }
+                }
+                .padding(.top, 8)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.black.opacity(0.55))
+                    Text("Prompt customization")
+                        .font(.custom("Nunito", size: 14))
+                        .fontWeight(.semibold)
+                        .foregroundColor(.black.opacity(0.8))
+                }
+            }
+            .animation(.easeInOut(duration: 0.2), value: advancedExpanded)
+        }
+    }
 
     private var routingMatrix: some View {
         VStack(alignment: .leading, spacing: 10) {

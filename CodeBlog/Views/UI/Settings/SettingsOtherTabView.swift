@@ -12,6 +12,23 @@ struct SettingsOtherTabView: View {
         case end
     }
 
+    private struct LanguagePreset: Identifiable {
+        let id: String
+        let displayName: String
+        let value: String
+    }
+
+    private static let customLanguageId = "__custom__"
+    private static let defaultLanguageId = "__default__"
+    private static let languagePresets: [LanguagePreset] = [
+        .init(id: "en", displayName: "English", value: "English"),
+        .init(id: "zh-Hans", displayName: "简体中文", value: "简体中文"),
+        .init(id: "es", displayName: "Español", value: "Español"),
+        .init(id: "ja", displayName: "日本語", value: "日本語"),
+        .init(id: "ko", displayName: "한국어", value: "한국어"),
+        .init(id: "fr", displayName: "Français", value: "Français")
+    ]
+
     var body: some View {
         VStack(alignment: .leading, spacing: 28) {
             timelineExportCard
@@ -70,14 +87,27 @@ struct SettingsOtherTabView: View {
                             .font(.custom("Nunito", size: 13))
                             .foregroundColor(.black.opacity(0.7))
                         HStack(spacing: 10) {
-                            TextField("English", text: $viewModel.outputLanguageOverride)
-                                .textFieldStyle(.roundedBorder)
-                                .disableAutocorrection(true)
-                                .frame(maxWidth: 220)
-                                .focused($isOutputLanguageFocused)
-                                .onChange(of: viewModel.outputLanguageOverride) {
-                                    viewModel.markOutputLanguageOverrideEdited()
+                            Picker("Output language", selection: outputLanguageSelection) {
+                                Text("Default (English)").tag(Self.defaultLanguageId)
+                                ForEach(Self.languagePresets) { preset in
+                                    Text(preset.displayName).tag(preset.id)
                                 }
+                                Text("Custom...").tag(Self.customLanguageId)
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                            .frame(maxWidth: 220, alignment: .leading)
+
+                            if currentLanguageSelectionKey == Self.customLanguageId {
+                                TextField("Enter custom language", text: $viewModel.outputLanguageOverride)
+                                    .textFieldStyle(.roundedBorder)
+                                    .disableAutocorrection(true)
+                                    .frame(maxWidth: 220)
+                                    .focused($isOutputLanguageFocused)
+                                    .onChange(of: viewModel.outputLanguageOverride) {
+                                        viewModel.markOutputLanguageOverrideEdited()
+                                    }
+                            }
                             CodeBlogSurfaceButton(
                                 action: {
                                     viewModel.saveOutputLanguageOverride()
@@ -347,4 +377,35 @@ struct SettingsOtherTabView: View {
         formatter.setLocalizedDateFormatFromTemplate("MMM d, yyyy")
         return formatter
     }()
+
+    private var outputLanguageSelection: Binding<String> {
+        Binding(
+            get: { currentLanguageSelectionKey },
+            set: { newSelection in
+                isOutputLanguageFocused = false
+                switch newSelection {
+                case Self.defaultLanguageId:
+                    viewModel.outputLanguageOverride = ""
+                case Self.customLanguageId:
+                    break
+                default:
+                    if let preset = Self.languagePresets.first(where: { $0.id == newSelection }) {
+                        viewModel.outputLanguageOverride = preset.value
+                    }
+                }
+                viewModel.markOutputLanguageOverrideEdited()
+            }
+        )
+    }
+
+    private var currentLanguageSelectionKey: String {
+        let trimmed = viewModel.outputLanguageOverride.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return Self.defaultLanguageId
+        }
+        if let preset = Self.languagePresets.first(where: { $0.value.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            return preset.id
+        }
+        return Self.customLanguageId
+    }
 }
