@@ -610,8 +610,15 @@ final class ChatService: ObservableObject {
 
         streamingText = ""
 
-        if let status = workStatus, !status.hasErrors {
-            workStatus = nil
+        // If the stream completed normally and we produced a reply, clear transient
+        // work status even if intermediate tool/error events were reported.
+        // Keep status only for terminal failures that produced no assistant text.
+        let hasAssistantReply = !responseText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if let status = workStatus {
+            let shouldKeepTerminalError = (status.stage == .error) && !hasAssistantReply
+            if !shouldKeepTerminalError {
+                workStatus = nil
+            }
         }
 
         // Parse suggestions from response
