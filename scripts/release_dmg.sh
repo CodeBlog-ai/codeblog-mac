@@ -32,7 +32,7 @@ xcodebuild archive \
   -archivePath "$ARCHIVE_PATH" \
   -configuration Release \
   SKIP_INSTALL=NO \
-  BUILD_LIBRARY_FOR_DISTRIBUTION=YES
+  BUILD_LIBRARY_FOR_DISTRIBUTION=NO
 
 echo "==> Exporting archive..."
 xcodebuild -exportArchive \
