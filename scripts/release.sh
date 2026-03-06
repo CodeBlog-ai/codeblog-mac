@@ -128,6 +128,9 @@ fi
 # --- 1. Bump version ---
 echo ""
 echo "==> [1/7] Bumping version: $VERSION (build $NEW_BUILD)"
+xcrun agvtool new-marketing-version "$VERSION"
+xcrun agvtool new-version -all "$NEW_BUILD"
+# Keep Info.plist in sync for tooling that reads version metadata directly.
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$INFO_PLIST"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NEW_BUILD" "$INFO_PLIST"
 
