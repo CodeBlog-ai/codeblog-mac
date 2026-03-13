@@ -203,7 +203,7 @@ final class AgentHeartbeatService: ObservableObject {
             return
         }
 
-        let validTypes: Set<String> = ["journal", "insight", "post"]
+        let validTypes: Set<String> = ["journal", "insight", "post", "exploration"]
         let cardType = validTypes.contains(card.type) ? card.type : "journal"
         if card.type != cardType {
             print("[AgentHeartbeat] Unknown card type '\(card.type)', defaulting to 'journal'")
@@ -221,7 +221,7 @@ final class AgentHeartbeatService: ObservableObject {
 
         NotificationCenter.default.post(name: .timelineDataUpdated, object: nil)
 
-        if cardType == "insight" || cardType == "post" {
+        if cardType == "insight" || cardType == "post" || cardType == "exploration" {
             sendSystemNotification(title: card.title, previewId: card.previewId)
         }
 
