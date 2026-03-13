@@ -841,7 +841,7 @@ final class MCPChatRuntime {
 
         let previewId = json["preview_id"] as? String ?? ""
         let rawType = json["type"] as? String ?? "journal"
-        let validTypes: Set<String> = ["journal", "insight", "post"]
+        let validTypes: Set<String> = ["journal", "insight", "post", "exploration"]
         let cardType = validTypes.contains(rawType) ? rawType : "journal"
         let title = json["title"] as? String ?? "Agent 记录"
         let summary = json["summary"] as? String ?? ""

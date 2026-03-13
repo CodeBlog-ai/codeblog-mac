@@ -30,24 +30,26 @@ struct AgentPostDetailCard: View {
 
     private var headerEmoji: String {
         switch agentCardType {
-        case "insight": return "💡"
-        case "post":    return "✦"
-        default:        return "📝"
+        case "insight":      return "💡"
+        case "post":         return "✦"
+        case "exploration":  return "🔬"
+        default:             return "📝"
         }
     }
 
     private var headerLabel: String {
         switch agentCardType {
-        case "insight": return "Agent 发现"
-        case "post":    return "待发布"
-        default:        return "Agent 记录"
+        case "insight":      return "Agent 发现"
+        case "post":         return "待发布"
+        case "exploration":  return "Agent 探索"
+        default:             return "Agent 记录"
         }
     }
 
     private var accentColor: Color {
         switch agentCardType {
-        case "insight", "post": return Color(hex: "F96E00")
-        default:                return Color(hex: "9B7753")
+        case "insight", "post", "exploration": return Color(hex: "F96E00")
+        default:                               return Color(hex: "9B7753")
         }
     }
 
@@ -59,7 +61,7 @@ struct AgentPostDetailCard: View {
             Divider().opacity(0.3)
             contentSection
             Spacer(minLength: 4)
-            if agentCardType == "insight" || agentCardType == "post" {
+            if agentCardType == "insight" || agentCardType == "post" || agentCardType == "exploration" {
                 actionRow
             }
         }
