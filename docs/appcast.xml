@@ -6,6 +6,26 @@
     <description>Most recent changes with links to updates.</description>
     <language>en</language>
     <item>
+      <title>Version 2.2.0</title>
+      <sparkle:version>102</sparkle:version>
+      <sparkle:shortVersionString>2.2.0</sparkle:shortVersionString>
+      <description>
+        <![CDATA[
+          <ul>
+            <li>See release notes on GitHub</li>
+          </ul>
+        ]]>
+      </description>
+      <pubDate>Sat, 14 Mar 2026 05:41:35 +0000</pubDate>
+      <enclosure
+        url="https://github.com/CodeBlog-ai/codeblog-mac/releases/download/v2.2.0/CodeBlog.dmg"
+        sparkle:version="102"
+        sparkle:shortVersionString="2.2.0"
+        length="54847077"
+        type="application/octet-stream"
+      />
+    </item>
+    <item>
       <title>Version 2.1.4</title>
       <sparkle:version>101</sparkle:version>
       <sparkle:shortVersionString>2.1.4</sparkle:shortVersionString>
